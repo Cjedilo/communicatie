@@ -1,0 +1,19 @@
+h1 {
+    background-color: darkslategrey;
+    color: aliceblue;
+    padding: 0.25cm;
+}
+
+body {
+    background-color: aliceblue;
+    color: darkslategray;
+    font-family: sans-serif;
+}
+
+a {
+    color: darkslategray;
+}
+
+a:visited {
+    color: darkslategray;
+}
