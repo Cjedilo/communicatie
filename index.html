@@ -1,20 +1,18 @@
-
+<!DOCTYPE html> 
 <html>
     <head>
-        <title>Communicatie</title>
-        <link rel="stylesheet" href="communicatie.css">
-        <script src="communicatie.js"></script>
+        <title>Communication</title>
+        <link rel="stylesheet" href="communicatie.css" />
+        <script src="communicatie.js"> </script>
     </head>
-    <body>
-        <h1>Kanalen</h1>
-        <h2>&Eacute;&eacute;n op &eacute;&eacute;n</h2>
-        <ul id="1-vs-1">
+    <body onload="communicatie.init_index()">
+        <h1>Index<span class="icons"><span onclick="communicatie.logout()">&#x1F6AA;</span></h1>
+        <h2>Channels</h2>
+        <ul id="channels">
         </ul>
-        <h2>Groepen</h2>
-        <ul>
-            <li>Voetbal</li>
-            <li>Cavias</li>
-            <li>Eten</li>
+        <label for="channel_name"><button onclick="communicatie.new_channel()">Create</button></label><input type="text" placeholder="New channel name" id="channel_name" /><br />
+        <h2>Users</h2>
+        <ul id="users">
         </ul>
     </body>
 </html>
