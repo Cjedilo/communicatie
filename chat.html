@@ -9,6 +9,6 @@
         <h1><span id="channel_name"></span><span class="icons"><span onclick="history.back()">&lArr;</span> <span onclick="communicatie.logout()">&#x1F6AA;</span></span></h1>
         <div id="messages"></div>
         <br />
-        <textarea id="message"></textarea><button onclick="communicatie.add_message()">send</button>
+        <textarea id="message_text"></textarea><button class="send" onclick="communicatie.add_message(communicatie.get_channel_id(), this.previousElementSibling.value)">send</button>
     </body>
 </html>

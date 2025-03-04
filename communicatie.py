@@ -5,6 +5,7 @@ import json
 import ssl
 import logging
 import postgres
+from datetime import datetime
 from websockets.asyncio.server import serve
 from uuid import UUID
 
@@ -12,43 +13,49 @@ from uuid import UUID
 class UUIDEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, UUID):
-            # if the obj is uuid, we simply return the value of uuid
             return str(obj)
+        if isinstance(obj, datetime):
+            return obj.strftime("%m/%d/%Y, %H:%M:%S")
         return json.JSONEncoder.default(self, obj)
 
 
 
-async def echo(websocket):
+async def handle(websocket):
     database = postgres.Postgres()
     await database.init()
     async for message in websocket:
         try:
             data = json.loads(message)
-            logging.info(f'Ontvangen: {data}')
-            response = {
-                "error": "request not suported"
-            }
-            if data.get("request") == "channels":
-                response = {'channels': await database.get_channels()}
-            elif data.get("request") == "users":
-                response = {'users': await database.get_users()}
-            elif data.get("request") == "new_user":
-                response = {'new_user': await database.create_user(data['user_name'], data['password'])}
-            elif data.get("request") == "new_channel":
-                response = {'new_channel': await database.create_channel(data['channel_name'])}
-            elif data.get("delete") == "channel":
-                response = {'delete_channel': await database.delete_channel(data['id'])}
-            elif data.get("delete") == "user":
-                response = {'delete_user': await database.delete_user(data['id'])}
-            elif data.get("message"):
-                response = await database.message(data["message"], data["channel"], data["user"])
-            elif data.get("channel"):
-                response = await database.channel(data["channel"])
-            elif data.get("login"):
-                response = await database.login(data["login"], data["password"])
-
-            logging.info(f"sending: {json.dumps(response, cls=UUIDEncoder)}")
-            await websocket.send(json.dumps(response, cls=UUIDEncoder))
+            logging.info(f'Received: {data}')
+            params = data.get('parameters')
+            match data["request"]:
+                case "read_channels":
+                    response = await database.get_channels()
+                case "read_users":
+                    response = await database.get_users()
+                case "create_user":
+                    response = await database.create_user(params['user_name'], params['password'])
+                case "create_channel":
+                    response = await database.create_channel(params['channel_name'])
+                case "delete_channel":
+                    response = await database.delete_channel(params['id'])
+                case "delete_user":
+                    response = await database.delete_user(params['id'])
+                case "message":
+                    response = await database.message(params["message"], params["channel"], params["user"])
+                case "read_channel":
+                    response = await database.channel(params["id"])
+                case "login":
+                    response = await database.login(params["user_name"], params["password"])
+                case "read_profiles":
+                    response = await database.read_profiles(params)
+                case _:
+                    response = {
+                        "error": "request not suported"
+                    }
+            response_string = json.dumps({"response": data["request"], "value": response}, cls=UUIDEncoder)
+            logging.info(f"sending: {response_string}")
+            await websocket.send(response_string)
         except json.JSONDecodeError as e:
             logging.error(f"Fout bij JSON decoderen! {e=}")
 
@@ -64,7 +71,7 @@ def make_ssl_context():
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    async with serve(echo, "0.0.0.0", 8181, ssl=make_ssl_context()) as server:
+    async with serve(handle, "0.0.0.0", 8181, ssl=make_ssl_context()) as server:
         await server.serve_forever()
 
 

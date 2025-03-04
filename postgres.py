@@ -31,19 +31,19 @@ class Postgres:
 
         return users
     
-    async def create_channel(self, group_name):
+    async def create_channel(self, channel_name):
         try:
-            group_id = await self.connection.fetchval('''
+            channel_id = await self.connection.fetchval('''
                 INSERT INTO channels (name) VALUES($1) RETURNING id
-            ''', group_name)
+            ''', channel_name)
 
             return {
-                "group_name": group_name,
-                "id": group_id
+                "name": channel_name,
+                "id": channel_id
             }
         except asyncpg.exceptions.UniqueViolationError:
             return {
-                "error": "Name '{group_name}' does already exist."
+                "error": "Channel '{channel_name}' does already exist."
             }
 
     async def create_user(self, user_name, password):
@@ -75,6 +75,10 @@ class Postgres:
             "user_id": user_id
         }
 
+    async def read_profiles(self, profiles):
+        result = await self.connection.fetch("SELECT name, avatar, id FROM users WHERE id = ANY($1::uuid[])", profiles)
+        response = [{"name": row["name"], "avatar": row["avatar"], "id": row["id"]} for row in result]
+        return response
 
     async def delete_channel(self, channel_id):
         await self.connection.execute("DELETE FROM channels where id = $1", channel_id)
@@ -85,15 +89,28 @@ class Postgres:
         return user_id
 
     async def channel(self, chat_id):
-        name = await self.connection.fetchval("SELECT name FROM channels where id = $1", chat_id)
-        return {
-            "chat_name": name,
-            "messages" : [row["text"] for row in reversed(await self.connection.fetch("SELECT text FROM messages where channel = $1 ORDER By created DESC LIMIT 25", chat_id))]
+        response = {
+            "messages" : [
+                {"id": row["id"], "message" : row["text"], "send_by": row["send_by"], "date": row["created"]}
+                    for row in reversed(await self.connection.fetch(
+                        "SELECT id, text, send_by, created FROM messages where channel = $1 ORDER By created DESC LIMIT 25", chat_id
+                    ))
+            ]
         }
+        name = await self.connection.fetchval("SELECT name FROM channels where id = $1", chat_id)
+        if name:
+            response["channel_name"] = name
+        else:
+            response["parent"] = chat_id
+
+        return response
 
     async def message(self, message, channel, user_id):
-        await self.connection.execute("INSERT INTO messages (channel, send_by, text) VALUES($1, $2, $3)", channel, user_id, message)
+        message_id, created = await self.connection.fetchval("INSERT INTO messages (channel, send_by, text) VALUES($1, $2, $3) RETURNING id, created", channel, user_id, message)
         return {
             "message": message,
-            "user_id": user_id
+            "id": message_id,
+            "send_by": user_id,
+            "parent": channel,
+            "date": created
         }
