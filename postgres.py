@@ -6,8 +6,9 @@ class Postgres:
     def __init__(self):
         self.connection = None
 
-    async def init(self):       
-        self.connection = await asyncpg.connect('postgresql://communicatie:communicatie@localhost/communicatie')
+    async def init(self):
+        if self.connection == None:       
+            self.connection = await asyncpg.connect('postgresql://communicatie:communicatie@localhost/communicatie')
     
     async def get_channels(self):
         rows = await self.connection.fetch("SELECT id, name FROM channels")
@@ -31,6 +32,16 @@ class Postgres:
 
         return users
     
+    async def get_user(self, user_id):
+        user_row = await self.connection.fetchrow("SELECT name, avatar from users where id = $1", user_id)
+        nr_messages = await self.connection.fetchval("SELECT COUNT(text) from messages where send_by = $1", user_id)
+
+        return {
+            "name": user_row['name'],
+            "avatar": user_row['avatar'],
+            "nr_messages": nr_messages
+        }
+
     async def create_channel(self, channel_name):
         try:
             channel_id = await self.connection.fetchval('''

@@ -33,6 +33,8 @@ async def handle(websocket):
                     response = await database.get_channels()
                 case "read_users":
                     response = await database.get_users()
+                case "read_user":
+                    response = await database.get_user(params['id'])
                 case "create_user":
                     response = await database.create_user(params['user_name'], params['password'])
                 case "create_channel":
