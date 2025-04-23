@@ -1,19 +1,12 @@
-<!DOCTYPE html> 
-<html>
-    <head>
-        <title>Chat</title>
-        <link rel="stylesheet" href="communicatie.css" />
-        <script src="communicatie.js"></script>
-    </head>
-    <body>
-        <h1>User</h1>
-        <h2>Login</h2>
-        <label for="user">User:</label><input type="text" id="user_name" /><br />
-        <label for="password">Password:</label><input type="password" id="password" /><br />
-        <button class="send" onclick="communicatie.login()">login</button>
-        <h2>Create</h2>
-        <label for="new_user">New user:</label><input type="text" id="new_user" /><br />
-        <label for="password">Password:</label><input type="password" id="password" /><br />
-        <button class="send" onclick="communicatie.create_user()">Create</button>
-    </body>
-</html>
+<h2>Login</h2>
+<form action="javascript:communicatie.login()">
+<label for="user">User:</label><input type="text" autocomplete="username" id="user_name" /><br />
+<label for="password">Password:</label><input type="password" autocomplete="current-password" id="password" /><br />
+<button type="submit" class="send">login</button>
+</form>
+<h2>Create</h2>
+<form>
+<label for="new_user">New user:</label><input type="text" autocomplete="username" id="new_user" /><br />
+<label for="new_password">Password:</label><input type="password" autocomplete="new-password" id="new_password" /><br />
+<button class="send" onclick="communicatie.create_user()">Create</button>
+</form>

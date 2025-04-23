@@ -1,17 +1,14 @@
 var communicatie = (function(){
-    needed_profiles = new Set();
-    known_profiles = {};
-    socket_open_todos = [];
-    public_id = private_id = null;
-    socket = new WebSocket("wss://www.appelo.nl:8181/ws");
+    let needed_profiles = new Set();
+    let known_profiles = {};
+    let public_id = private_id = null;
+    let channel_id = null;
+    let socket = new WebSocket("wss://www.appelo.nl:8181/ws");
     
     socket.onopen = function(_event) {
         console.log("socket open");
-        for(todo in socket_open_todos) {
-            socket_open_todos[todo]();
-        }
-        socket_open_todos = [];
     };
+
     socket.onerror = function(event) {
         console.error('onerror!!!', event);
     }
@@ -20,9 +17,16 @@ var communicatie = (function(){
         item = document.createElement("li");
         item.dataset.id = channel.id;
         link = document.createElement("a");
-        link.setAttribute("href", `chat.html?id=${channel.id}`);
+        link.setAttribute("href", `javascript:communicatie.set_channel_id("${channel.id}");communicatie.show_page("chat.html", {"read_channel":{"id": "${channel.id}"}})`);
         link.appendChild(document.createTextNode(channel.name));
         item.appendChild(link);
+        span = document.createElement("span");
+        if(channel.properties.public) {
+            span.textContent = "🔓";
+        } else {
+            span.textContent = "🔒"; 
+        }
+        item.appendChild(span);
         if(channel.owner === public_id) {
             span = document.createElement("span");
             span.setAttribute("class", "trash");
@@ -142,8 +146,11 @@ var communicatie = (function(){
         switch(data.response) {
             case "login":
                 if(data.value.private_id) {
-                    document.cookie = `user_id=${data.value.private_id}:${data.value.public_id}`;
-                    document.location.replace("index.html");
+                    private_id = data.value.private_id;
+                    public_id = data.value.public_id;
+                    show_page("channels.html", {"read_channels": null, "read_users": null});
+                } else {
+                    show_error("Login failed.");
                 }
  
                 break;
@@ -160,7 +167,7 @@ var communicatie = (function(){
                     item = document.createElement("li");
                     item.dataset.id = data.value[user].id;
                     link = document.createElement("a")
-                    link.setAttribute("href", `user.html?id=${data.value[user].id}`);
+                    link.setAttribute("href", `javascript:communicatie.show_page('user.html',  {'read_user': {'id': '${data.value[user].id}'}})`);
                     link.appendChild(document.createTextNode(data.value[user].name));
                     item.appendChild(link);
                     if(data.value[user].id === public_id) {
@@ -176,7 +183,7 @@ var communicatie = (function(){
                 break;
             case "read_channel":
                 if(data.value.channel_name) {
-                    header = document.getElementById("channel_name");
+                    header = document.getElementById("title");
                     header.textContent = data.value.channel_name;
                     parent = document.getElementById("messages");
                 } else {
@@ -189,7 +196,7 @@ var communicatie = (function(){
                 request_user_profiles();
                 break;
             case "message":
-                if(data.value.parent == communicatie.get_channel_id()) {
+                if(data.value.parent === channel_id) {
                     parent = document.getElementById("messages");
                 } else {
                     parent = document.querySelector(`[data-id*="${data.value.parent}"]`);
@@ -240,7 +247,7 @@ var communicatie = (function(){
 
                 break;
             case "read_user":
-                document.getElementById("user_name").replaceChildren(document.createTextNode(data.value.name));
+                document.getElementById("title").textContent = data.value.name;
                 document.getElementById("avatar").src = data.value.avatar;
                 document.getElementById("number_of_messages").value = data.value.nr_messages;
         }
@@ -258,8 +265,10 @@ var communicatie = (function(){
     function create_channel() {
         request("create_channel", {
             channel_name: document.getElementById('channel_name').value,
+            public: document.getElementById('public').value === "public",
         });
         document.getElementById('channel_name').value = "";
+        document.getElementById('public').value = "private";
     }
 
     function create_user() {
@@ -285,61 +294,39 @@ var communicatie = (function(){
         }
     }
 
-    function check_user() {
-        if(document.cookie.startsWith("user_id=")) {
-            ids = document.cookie.slice(8).split(":");
-            private_id = ids[0];
-            public_id = ids[1];
-        } else {
-            document.location.replace("login.html");
-        }
+    function show_error(message) {
+        error = document.getElementById("error");
+        error.innerHTML = message;
+        error.hidden = false;
+        setTimeout(() => {
+            error.hidden = true;
+        }, 5000);
     }
 
-    function init_index() {
-        console.log("init");
-        check_user();
-        if(socket.readyState == socket.OPEN) {
-            request("read_channels");
-            request("read_users");
-        } else {
-            socket_open_todos.push(init_index);
-        }
-    }
-
-    function init_chat() {
-        console.log("init");
-        check_user();
-        if(socket.readyState == socket.OPEN) {
-            const searchParams = new URLSearchParams(window.location.search);
-            if(searchParams.has('id')) {
-                channel_id = searchParams.get('id');
-                request("read_channel", {
-                    id: channel_id,
-                });
-                channel_id = searchParams.get('id');
+    function show_page(url, actions) {
+        fetch(url).then((response) => {
+            if (response.ok) {
+                return response.text(); 
             } else {
-                channel_id = null;
+                show_error('Network response was not ok'); 
             }
-        } else {
-            socket_open_todos.push(init_chat);
-        }
-    }
-
-    function init_user() {
-        console.log("init");
-        check_user();
-        if(socket.readyState == socket.OPEN) {
-            const searchParams = new URLSearchParams(window.location.search);
-            if(searchParams.has('id')) {
-                user_id = searchParams.get('id');
-                request("read_user", {
-                    id: user_id,
+        }).then((data) => {
+            document.getElementById("page").innerHTML = data;
+            if(actions) {
+                Object.keys(actions).forEach(action => {
+                    if(actions[action] === null) {
+                        request(action);
+                    } else {
+                        request(action, actions[action]);
+                    }
                 });
             }
-        } else {
-            socket_open_todos.push(init_user);
-        }
+        });
+    }
 
+    function init() {
+        console.log("init");
+        show_page("login.html");
     }
 
     function add_message(parent, message) {
@@ -374,13 +361,12 @@ var communicatie = (function(){
         });
     }
 
-    function logout() {
-        document.cookie = "";
-        document.location.replace("login.html");
-    }
-
     function get_channel_id() {
         return channel_id;
+    }
+
+    function set_channel_id(id) {
+        channel_id = id;
     }
 
     function set_avatar() {
@@ -419,36 +405,35 @@ var communicatie = (function(){
 
         if (event.dataTransfer.items) {
             [...event.dataTransfer.items].forEach((item, i) => {
-                // If dropped items aren't files, reject them
                 if (item.kind === "file") {
                   const file = item.getAsFile();
-                  console.log(`… file[${i}].name = ${file.name}`);
+                  console.log(`name = ${file.name}`);
                   upload(file);
+                  return;
                 }
             });
         } else {
-            // Use DataTransfer interface to access the file(s)
             [...event.dataTransfer.files].forEach((file, i) => {
-              console.log(`… file[${i}].name = ${file.name}`);
+              console.log(`name = ${file.name}`);
               upload(file);
+              return;
             });
           }
     }
 
     return {
-        init_index: init_index,
-        init_chat: init_chat,
-        init_user: init_user,
+        init: init,
         create_channel: create_channel,
         create_user: create_user,
         delete_channel: delete_channel,
         delete_user: delete_user,
         add_message: add_message,
         login: login,
-        logout: logout,
         reply: reply,
         get_channel_id: get_channel_id,
+        set_channel_id: set_channel_id,
         set_avatar: set_avatar,
         image: image,
+        show_page: show_page,
     };
 })();

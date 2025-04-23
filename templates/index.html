@@ -5,14 +5,9 @@
         <link rel="stylesheet" href="communicatie.css">
         <script src="communicatie.js"> </script>
     </head>
-    <body onload="communicatie.init_index()">
-        <h1>Index<span class="icons"></span><span onclick="communicatie.logout()">&#x1F6AA;</span></h1>
-        <h2>Channels</h2>
-        <ul id="channels">
-        </ul>
-        <label for="channel_create"><button id="channel_create" class="send" onclick="communicatie.create_channel()">Create</button></label><input type="text" placeholder="New channel name" id="channel_name"><br>
-        <h2>Users</h2>
-        <ul id="users">
-        </ul>
+    <body onload="communicatie.init()">
+        <h1><span id="title">Index</span><span class="icons"></span><span onclick="javascript:communicatie.show_page('channels.html',  {'read_channels': null, 'read_users': null});document.getElementById('title').textContent = 'Index'">🏠</span><span onclick="window.location.replace('index.html')">&#x1F6AA;</span></h1>
+        <div id="error" hidden></div>
+        <div id="page"></div>
     </body>
 </html>

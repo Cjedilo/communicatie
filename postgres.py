@@ -1,3 +1,4 @@
+import json
 import asyncpg
 import hashlib
 import logging
@@ -10,16 +11,26 @@ class Postgres:
         if self.connection == None:       
             self.connection = await asyncpg.connect('postgresql://communicatie:communicatie@localhost/communicatie')
     
-    async def get_channels(self):
-        rows = await self.connection.fetch("SELECT id, text, send_by FROM messages where channel is null")
+    async def get_channels(self, private_id):
+        rows = await self.connection.fetch("SELECT id, text, send_by, properties FROM messages where channel is null and (properties->>'public')::boolean IS TRUE")
         channels = []
         for row in rows:
             channels.append({
                 'name': row['text'],
                 'id': row['id'],
                 'owner': row['send_by'],
+                'properties': json.loads(row['properties']),
             })
 
+        rows = await self.connection.fetch("SELECT id, text, send_by, properties FROM messages JOIN channel_member on channel_member.channel = messages.id where channel_member.member = (SELECT public_id from users where private_id = $1) and messages.channel is null and (messages.properties->>'public')::boolean IS FALSE", private_id)
+        for row in rows:
+            channels.append({
+                'name': row['text'],
+                'id': row['id'],
+                'owner': row['send_by'],
+                'properties': row['properties'],
+            })
+        
         return channels
 
     async def get_users(self):
@@ -43,15 +54,20 @@ class Postgres:
             "nr_messages": nr_messages,
         }
 
-    async def create_channel(self, channel_name, private_id):
+    async def create_channel(self, channel_name, public, private_id):
         try:
-            channel_id = await self.connection.fetchval('''
-                INSERT INTO messages (channel, send_by, text) VALUES(null, (SELECT public_id from users where private_id = $2), $1) RETURNING id
-            ''', channel_name, private_id)
-
+            result = await self.connection.fetchrow('''
+                INSERT INTO messages (channel, send_by, text, properties) VALUES(null, (SELECT public_id from users where private_id = $3), $1, $2::jsonb) RETURNING id, send_by, properties
+            ''', channel_name, json.dumps({"public": public}), private_id)
+            if not public:
+                await self.connection.execute('''
+                    INSERT INTO channel_member (channel, member) VALUES($1, (SELECT public_id from users where private_id = $2))
+                ''', result["id"], private_id)
             return {
                 "name": channel_name,
-                "id": channel_id,
+                "id": result["id"],
+                "owner": result["send_by"],
+                "properties": result["properties"],                
             }
         except asyncpg.exceptions.UniqueViolationError:
             return {

@@ -28,7 +28,7 @@ class RequestHandler:
             private_id = data['private_id']
             match data["request"]:
                 case "read_channels":
-                    response = await self.database.get_channels()
+                    response = await self.database.get_channels(private_id)
                 case "read_users":
                     response = await self.database.get_users()
                 case "read_user":
@@ -36,7 +36,7 @@ class RequestHandler:
                 case "create_user":
                     response = await self.database.create_user(params['user_name'], params['password'])
                 case "create_channel":
-                    response = await self.database.create_channel(params['channel_name'], private_id)
+                    response = await self.database.create_channel(params['channel_name'], params['public'], private_id)
                 case "delete_channel":
                     response = await self.database.delete_channel(params['id'], private_id)
                 case "delete_user":

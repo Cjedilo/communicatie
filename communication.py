@@ -43,6 +43,10 @@ async def get_login(request):
 async def get_user(request):
     return aiohttp_jinja2.render_template("user.html", request, context={})
 
+@routes.get('/channels.html')
+async def get_channels(request):
+    return aiohttp_jinja2.render_template("channels.html", request, context={})
+
 @routes.get('/img/{tail:.*}')
 async def image(request):
     data = pathlib.Path(request.url.path.strip('/')).read_bytes()
