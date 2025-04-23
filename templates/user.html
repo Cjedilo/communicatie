@@ -7,7 +7,7 @@
     </head>
     <body onload="communicatie.init_user()">
         <h1 id="user_name"></h1>
-        <form method="post" enctype="multipart/form-data" onsubmit="communicatie.upload_file(); return false;">
+        <form method="post" enctype="multipart/form-data" onsubmit="communicatie.set_avatar(); return false;">
             <label for="new_avatar">Avatar</label><img id="avatar" src="img/empty.webp"><input type="file" id="new_avatar" name="img" accept="image/*"><input type="submit">
         </form>
         <label for="number_of_messages">Number of messages</label><input id="number_of_messages" type="number" disabled>

@@ -8,7 +8,8 @@
     <body onload="communicatie.init_chat()">
         <h1><span id="channel_name"></span><span class="icons"><span onclick="history.back()">&lArr;</span> <span onclick="communicatie.logout()">&#x1F6AA;</span></span></h1>
         <div id="messages"></div>
-        <br />
-        <textarea id="message_text"></textarea><button class="send" onclick="communicatie.add_message(communicatie.get_channel_id(), this.previousElementSibling.value)">send</button>
+        <br>
+        <img id="image-root" class="message_image" hidden>
+        <textarea id="message_text" ondrop="communicatie.image(event, 'root')"></textarea><button class="send" onclick="communicatie.add_message(communicatie.get_channel_id(), this.previousElementSibling.value)">send</button>
     </body>
 </html>

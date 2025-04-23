@@ -1,6 +1,5 @@
 #!venv/bin/python
 
-import asyncio
 import logging
 import mimetypes
 import pathlib
@@ -16,6 +15,7 @@ routes = web.RouteTableDef()
 handler = request_handler.RequestHandler()
 
 @routes.get('/')
+@routes.get('/index.html')
 async def get_index(request):
     return aiohttp_jinja2.render_template("index.html", request, context={})
 
@@ -47,6 +47,25 @@ async def get_user(request):
 async def image(request):
     data = pathlib.Path(request.url.path.strip('/')).read_bytes()
     return web.Response(body=data, content_type=mimetypes.guess_type(request.url.path)[0])
+
+@routes.post("/set_avatar")
+async def set_avatar(request):
+    post = await request.post()
+    image = post.get("file")
+    private_id = post.get("private_id")
+    logging.info(image)
+    await handler.set_avatar(image, private_id)
+    
+    return web.Response(body="ok")
+
+@routes.post("/upload")
+async def upload(request):
+    post = await request.post()
+    image = post.get("file")
+    private_id = post.get("private_id")
+    logging.info(image)
+    
+    return web.Response(body=await handler.upload(image, private_id))
 
 @routes.get('/ws')
 async def websocket_handler(request):

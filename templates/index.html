@@ -1,16 +1,16 @@
 <!DOCTYPE html> 
-<html>
+<html lang="en-US">
     <head>
         <title>Communication</title>
-        <link rel="stylesheet" href="communicatie.css" />
+        <link rel="stylesheet" href="communicatie.css">
         <script src="communicatie.js"> </script>
     </head>
     <body onload="communicatie.init_index()">
-        <h1>Index<span class="icons"><span onclick="communicatie.logout()">&#x1F6AA;</span></h1>
+        <h1>Index<span class="icons"></span><span onclick="communicatie.logout()">&#x1F6AA;</span></h1>
         <h2>Channels</h2>
         <ul id="channels">
         </ul>
-        <label for="channel_name"><button class="send" onclick="communicatie.create_channel()">Create</button></label><input type="text" placeholder="New channel name" id="channel_name" /><br />
+        <label for="channel_create"><button id="channel_create" class="send" onclick="communicatie.create_channel()">Create</button></label><input type="text" placeholder="New channel name" id="channel_name"><br>
         <h2>Users</h2>
         <ul id="users">
         </ul>

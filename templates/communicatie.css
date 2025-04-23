@@ -39,6 +39,11 @@ img {
   margin-bottom: auto;
 }
 
+.message_image {
+  width: auto;
+  height: auto;
+}
+
 a {
     color: var(--second);
 }

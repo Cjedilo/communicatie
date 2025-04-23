@@ -2,6 +2,7 @@ var communicatie = (function(){
     needed_profiles = new Set();
     known_profiles = {};
     socket_open_todos = [];
+    public_id = private_id = null;
     socket = new WebSocket("wss://www.appelo.nl:8181/ws");
     
     socket.onopen = function(_event) {
@@ -21,12 +22,14 @@ var communicatie = (function(){
         link = document.createElement("a");
         link.setAttribute("href", `chat.html?id=${channel.id}`);
         link.appendChild(document.createTextNode(channel.name));
-        span = document.createElement("span");
-        span.setAttribute("class", "trash");
-        span.setAttribute("onclick", `communicatie.delete_channel('${channel.id}')`);
-        span.innerHTML = "&#x1F5D1;";
         item.appendChild(link);
-        item.appendChild(span);
+        if(channel.owner === public_id) {
+            span = document.createElement("span");
+            span.setAttribute("class", "trash");
+            span.setAttribute("onclick", `communicatie.delete_channel('${channel.id}')`);
+            span.innerHTML = "&#x1F5D1;";
+            item.appendChild(span);
+        }
         list.appendChild(item);
     }
 
@@ -78,8 +81,16 @@ var communicatie = (function(){
         }
         inner_div.appendChild(img);
         
-        inner_div.appendChild(document.createTextNode(message.message));
-        
+        message_div = document.createElement("div");
+        if(message.image) {
+            img = document.createElement("img");
+            img.src = message.image
+            img.classList.add("message_image");
+            message_div.appendChild(img);
+            message_div.appendChild(document.createElement("br"));
+        }
+        message_div.appendChild(document.createTextNode(message.message));
+        inner_div.appendChild(message_div);
         reply = document.createElement("span");
         reply.setAttribute("class", "icons");
         reply.setAttribute("onclick", "communicatie.reply(this.parentNode.parentNode)");
@@ -104,7 +115,13 @@ var communicatie = (function(){
         parent = document.querySelector(`[data-id*="${element.dataset.id}"]`);
         div = document.createElement("div");
         div.id = "reply";
+        img = document.createElement("img");
+        img.id = `image-${element.dataset.id}`;
+        img.hidden = true;
+        img.classList.add("message_image");
+        div.appendChild(img);
         text = document.createElement("textarea");
+        text.setAttribute("ondrop", `communicatie.image(event, '${element.dataset.id}')`);
         div.appendChild(text);
         send = document.createElement("button");
         send.setAttribute("onclick", `communicatie.add_message('${element.dataset.id}', this.previousElementSibling.value)`)
@@ -124,8 +141,10 @@ var communicatie = (function(){
         data = JSON.parse(event.data);
         switch(data.response) {
             case "login":
-                document.cookie = `user_id=${data.value.user_id}`;
-                document.location.replace("index.html");
+                if(data.value.private_id) {
+                    document.cookie = `user_id=${data.value.private_id}:${data.value.public_id}`;
+                    document.location.replace("index.html");
+                }
  
                 break;
             case "read_channels":
@@ -143,12 +162,14 @@ var communicatie = (function(){
                     link = document.createElement("a")
                     link.setAttribute("href", `user.html?id=${data.value[user].id}`);
                     link.appendChild(document.createTextNode(data.value[user].name));
-                    span = document.createElement("span");
-                    span.setAttribute("class", "trash");
-                    span.setAttribute("onclick", `communicatie.delete_user('${data.value[user].id}')`);
-                    span.innerHTML = "&#x1F5D1;";
                     item.appendChild(link);
-                    item.appendChild(span);
+                    if(data.value[user].id === public_id) {
+                        span = document.createElement("span");
+                        span.setAttribute("class", "trash");
+                        span.setAttribute("onclick", `communicatie.delete_user('${data.value[user].id}')`);
+                        span.innerHTML = "&#x1F5D1;";
+                        item.appendChild(span);
+                    }
                     list.appendChild(item);
                 }
 
@@ -175,7 +196,8 @@ var communicatie = (function(){
                 }
 
                 append_message(parent, data.value);
-    
+                request_user_profiles();
+
                 break;
             case "create_channel":
                 list = document.getElementById("channels");
@@ -228,8 +250,9 @@ var communicatie = (function(){
     function request(request, parameters) {
         socket.send(JSON.stringify({
             request: request,
+            private_id: private_id,
             parameters: parameters
-        }))
+        }));
     }
 
     function create_channel() {
@@ -264,7 +287,9 @@ var communicatie = (function(){
 
     function check_user() {
         if(document.cookie.startsWith("user_id=")) {
-            user_id = document.cookie.slice(-36);
+            ids = document.cookie.slice(8).split(":");
+            private_id = ids[0];
+            public_id = ids[1];
         } else {
             document.location.replace("login.html");
         }
@@ -310,9 +335,6 @@ var communicatie = (function(){
                 request("read_user", {
                     id: user_id,
                 });
-                user_id = searchParams.get('id');
-            } else {
-                user_id = null;
             }
         } else {
             socket_open_todos.push(init_user);
@@ -321,14 +343,25 @@ var communicatie = (function(){
     }
 
     function add_message(parent, message) {
+        if(parent == channel_id) {
+            img_src = document.getElementById("image-root").src;
+        } else {
+            img_src = document.getElementById(`image-${parent}`).src;
+        }
+        if(img_src === "") {
+            img_src = null;
+        }
+
         request("message", {
             "message": message,
+            "image": img_src,
             "channel": parent,
-            "user": user_id,
+            "user": private_id,
         });
 
         if(parent == channel_id) {
             document.getElementById("message_text").value = "";
+            document.getElementById("image-root").hidden = true;
         } else {
             document.getElementById("reply").remove();
         }
@@ -350,30 +383,56 @@ var communicatie = (function(){
         return channel_id;
     }
 
-    function upload_file() {
-        function arrayBufferToBase64(buffer) {
-            let binary = ''
-            const bytes = new Uint8Array(buffer)
-            const len = bytes.byteLength
-            for (let i = 0; i < len; i++) {
-              // in Chrome, concatenating a string is faster
-              // than pushing to a string array
-              binary += String.fromCharCode(bytes[i])
-            }
-            return btoa(binary)
-          }
-        file = document.getElementById("new_avatar").files[0];
-        reader = new FileReader();
-        reader.onload = function(e) {
-            const fileContent = e.target.result;
-            console.log("Bestand gelezen:", fileContent);
-            str = arrayBufferToBase64(fileContent);
-            request("image", {
-                "file_data": str,
+    function set_avatar() {
+        const formData = new FormData();
+        formData.append("file",  document.getElementById("new_avatar").files[0]);
+        formData.append("private_id", private_id);
+        fetch("/set_avatar", {
+            method: "POST",
+            body: formData,
+        });
+    }
+
+    function image(event, parent) {
+        function upload(file) {
+            const formData = new FormData();
+            formData.append("file",  file);
+            formData.append("private_id", private_id);
+            fetch("/upload", {
+                method: "POST",
+                body: formData,
+            }).then((response) => {
+                if (response.ok) {
+                    return response.json(); 
+                } else {
+                    throw new Error('Network response was not ok'); 
+                }
+            }).then((data) => {
+                console.log(data);
+                image = document.getElementById(`image-${parent}`);
+                image.src = data;
+                image.removeAttribute("hidden");
             });
-            
-        };
-        reader.readAsArrayBuffer(file);
+        }
+
+        event.preventDefault();
+
+        if (event.dataTransfer.items) {
+            [...event.dataTransfer.items].forEach((item, i) => {
+                // If dropped items aren't files, reject them
+                if (item.kind === "file") {
+                  const file = item.getAsFile();
+                  console.log(`… file[${i}].name = ${file.name}`);
+                  upload(file);
+                }
+            });
+        } else {
+            // Use DataTransfer interface to access the file(s)
+            [...event.dataTransfer.files].forEach((file, i) => {
+              console.log(`… file[${i}].name = ${file.name}`);
+              upload(file);
+            });
+          }
     }
 
     return {
@@ -389,6 +448,7 @@ var communicatie = (function(){
         logout: logout,
         reply: reply,
         get_channel_id: get_channel_id,
-        upload_file: upload_file,
+        set_avatar: set_avatar,
+        image: image,
     };
 })();

@@ -1,3 +1,5 @@
+import os
+import uuid
 import postgres
 import json
 import logging
@@ -23,6 +25,7 @@ class RequestHandler:
             data = json.loads(request)
             logging.info(f'Received: {data}')
             params = data.get('parameters')
+            private_id = data['private_id']
             match data["request"]:
                 case "read_channels":
                     response = await self.database.get_channels()
@@ -33,13 +36,13 @@ class RequestHandler:
                 case "create_user":
                     response = await self.database.create_user(params['user_name'], params['password'])
                 case "create_channel":
-                    response = await self.database.create_channel(params['channel_name'])
+                    response = await self.database.create_channel(params['channel_name'], private_id)
                 case "delete_channel":
-                    response = await self.database.delete_channel(params['id'])
+                    response = await self.database.delete_channel(params['id'], private_id)
                 case "delete_user":
-                    response = await self.database.delete_user(params['id'])
+                    response = await self.database.delete_user(params['id'], private_id)
                 case "message":
-                    response = await self.database.message(params["message"], params["channel"], params["user"])
+                    response = await self.database.message(params["message"], params.get("image"), params["channel"], params["user"])
                 case "read_channel":
                     response = await self.database.channel(params["id"])
                 case "login":
@@ -51,3 +54,24 @@ class RequestHandler:
                         "error": "request not suported"
                     }
             return json.dumps({"response": data["request"], "value": response}, cls=JSONEncoder)
+
+    async def set_avatar(self, image, private_id):
+        img_content = image.file.read()
+        img_extention = os.path.splitext(image.filename)[1]
+        img_name = str(uuid.uuid4())
+        full_name = f"img/{img_name}{img_extention}"
+        with open(full_name, "wb") as file:
+            file.write(img_content)
+        
+        await self.database.set_avatar(private_id, full_name)
+
+    async def upload(self, image, private_id):
+        img_content = image.file.read()
+        img_extention = os.path.splitext(image.filename)[1]
+        img_name = str(uuid.uuid4())
+        full_name = f"img/{img_name}{img_extention}"
+        with open(full_name, "wb") as file:
+            file.write(img_content)
+        
+        return json.dumps(full_name)
+
