@@ -186,6 +186,9 @@ var communicatie = (function(){
                     header = document.getElementById("title");
                     header.textContent = data.value.channel_name;
                     parent = document.getElementById("messages");
+                    if(!data.value.properties.public && data.value.owner === public_id) {
+                        document.getElementById("user_icon").hidden = false;
+                    }
                 } else {
                     parent = document.querySelector(`[data-id*="${data.value.parent}"]`);
                 }
@@ -250,6 +253,39 @@ var communicatie = (function(){
                 document.getElementById("title").textContent = data.value.name;
                 document.getElementById("avatar").src = data.value.avatar;
                 document.getElementById("number_of_messages").value = data.value.nr_messages;
+                break;
+            case "read_members":
+                members = document.getElementById("members");
+                members.innerHTML = "";
+                none_members = document.getElementById("none-members");
+                none_members.innerHTML = "";
+                for(user of data.value.members) {
+                    item = document.createElement("li");
+                    item.setAttribute("ondragstart", "communicatie.drag_member(event)");
+                    item.dataset.id = user.id;
+                    item.setAttribute("draggable", "true");
+                    img = document.createElement("img");
+                    img.src = user.avatar;
+                    item.appendChild(img);
+                    span = document.createElement("span");
+                    span.textContent = user.name;
+                    item.appendChild(span);
+                    members.appendChild(item);
+                }
+                for(user of data.value["none-members"]) {
+                    item = document.createElement("li");
+                    item.setAttribute("ondragstart", "communicatie.drag_member(event)");
+                    item.dataset.id = user.id;
+                    item.setAttribute("draggable", "true");
+                    img = document.createElement("img");
+                    img.src = user.avatar;
+                    item.appendChild(img);
+                    span = document.createElement("span");
+                    span.textContent = user.name;
+                    item.appendChild(span);
+                    none_members.appendChild(item);
+                }
+                break;
         }
             
     };    
@@ -304,6 +340,8 @@ var communicatie = (function(){
     }
 
     function show_page(url, actions) {
+        document.getElementById("user_icon").hidden = true;
+
         fetch(url).then((response) => {
             if (response.ok) {
                 return response.text(); 
@@ -421,6 +459,35 @@ var communicatie = (function(){
           }
     }
 
+    function manage_users() {
+        document.getElementById("user_manager").hidden = false;
+        request("read_members", channel_id);
+    }
+
+    function member(event, is_member) {
+        event.preventDefault();
+        console.log(event);
+        const id = event.dataTransfer.getData("text/plain");
+        const dragged_element = document.querySelector(`[data-id*="${id}"]`);
+        if (!dragged_element) return;
+
+        if(is_member) {
+            document.getElementById("members").appendChild(dragged_element);
+        } else {
+            document.getElementById("none-members").appendChild(dragged_element);
+        }
+        request("set_member", {
+            channel: channel_id,
+            user: id,
+            is_member: is_member,
+        });
+}
+
+    function drag_member(event) {
+        event.dataTransfer.setData("text/plain", event.currentTarget.dataset.id);
+        event.dataTransfer.effectAllowed = "move";
+    }
+
     return {
         init: init,
         create_channel: create_channel,
@@ -435,5 +502,8 @@ var communicatie = (function(){
         set_avatar: set_avatar,
         image: image,
         show_page: show_page,
+        manage_users: manage_users,
+        member: member,
+        drag_member: drag_member,
     };
 })();

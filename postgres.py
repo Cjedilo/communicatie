@@ -107,6 +107,34 @@ class Postgres:
         result = await self.connection.fetch("SELECT name, avatar, public_id FROM users WHERE public_id = ANY($1::uuid[])", profiles)
         response = [{"name": row["name"], "avatar": row["avatar"], "id": row["public_id"]} for row in result]
         return response
+    
+    async def read_members(self, channel_id):
+        result = await self.connection.fetch("SELECT public_id, name, avatar FROM users JOIN channel_member on channel_member.member = users.public_id WHERE channel = $1", channel_id)
+        response = [{"name": row["name"], "avatar": row["avatar"], "id": row["public_id"]} for row in result]
+        result = await self.connection.fetch("SELECT public_id, name, avatar FROM users")
+        response = {"members": response, "none-members": []}
+        members = set([row["id"] for row in response["members"]])
+        for row in result:
+            if row["public_id"] not in members:
+                response["none-members"].append({"name": row["name"], "avatar": row["avatar"], "id": row["public_id"]})
+        return response
+    
+    async def set_member(self, channel_id, user_id, is_member, private_id):
+        owner = str(await self.connection.fetchval("SELECT private_id from users where public_id = (SELECT send_by FROM messages where id = $1)", channel_id))
+        if owner != private_id:
+            return {
+                "error": "You are not the owner of this channel."
+            }
+        if(user_id == owner):
+            return {
+                "error": "You cannot remove the owner from the channel."
+            }
+        if is_member:
+            await self.connection.execute("INSERT INTO channel_member (channel, member) VALUES($1, $2)", channel_id, user_id)
+        else:
+            await self.connection.execute("DELETE FROM channel_member where channel = $1 and member = $2", channel_id, user_id)
+
+        return True
 
     async def delete_channel(self, channel_id, private_id):
         result = await self.connection.execute("DELETE FROM messages where id = $1 AND send_by = (SELECT public_id from users where private_id = $2)", channel_id, private_id)
@@ -126,9 +154,11 @@ class Postgres:
                     ))
             ]
         }
-        name = await self.connection.fetchval("SELECT text FROM messages where id = $1 and channel is null", chat_id)
-        if name:
-            response["channel_name"] = name
+        result = await self.connection.fetchrow("SELECT text, properties, send_by FROM messages where id = $1 and channel is null", chat_id)
+        if result:
+            response["channel_name"] = result["text"]
+            response["properties"] = json.loads(result["properties"])
+            response["owner"] = result["send_by"]
         else:
             response["parent"] = chat_id
 

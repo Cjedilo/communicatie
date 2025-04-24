@@ -15,6 +15,31 @@ h1 {
     align-items: center;
 }
 
+caption {
+    background-color: var(--main);
+    color: var(--second);
+    margin: 2px;
+    padding: 2px;
+}
+
+.caption_icons {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+table {
+  width: 100%;
+}
+
+th {
+  width: 50%;
+}
+
+tr {
+  color: var(--main);
+}
+
 .icons {
     margin-left: auto;
     bottom: 0;
@@ -23,6 +48,47 @@ h1 {
 .message_header {
   text-align: right;
   font-size: 50%;
+}
+
+#user_table_body td {
+  height: 100%;
+  vertical-align: top;
+}
+
+.user_list {
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+#user_table {
+  height: 90%;
+  table-layout: fixed;
+}
+
+#user_table_body {
+  display: table-row-group;
+}
+
+td {
+  border: solid;
+  border-color: var(--main-light);
+}
+
+.user_manager {
+  position: absolute;
+  top: 85px;
+  right: 0.25cm;
+  width: 300px;
+  height: 40%;
+  border: solid;
+  border-color: var(--main-light);
+  background-color: var(--second);
+}
+
+.user_list {
+  list-style-type: none;
+  padding: 0;
+  margin: 0;
 }
 
 body {

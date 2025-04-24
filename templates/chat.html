@@ -1,3 +1,20 @@
+<div id="user_manager" class="user_manager" hidden>
+    <table id="user_table" class="user_table">
+        <caption><span class="caption_icons"><span class="title">Add or remove users</span><span class="icons" onclick="document.getElementById('user_manager').hidden = true">✖</span></span></caption>
+        <thead>
+        <tr>
+            <th>Members</th>
+            <th>None Members</th>
+        </tr>
+        </thead>
+        <tbody id="user_table_body">
+            <tr ondragover="event.preventDefault();return false;">
+                <td ondrop="communicatie.member(event, true)"><ul id="members" class="user_list"></ul></td>
+                <td ondrop="communicatie.member(event, false)"><ul id="none-members" class="user_list"></ul></td>
+            </tr>
+        </tbody>
+    </table>
+</div>
 <div id="messages"></div>
 <br>
 <img id="image-root" class="message_image" hidden>

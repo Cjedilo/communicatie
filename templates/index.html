@@ -6,7 +6,14 @@
         <script src="communicatie.js"> </script>
     </head>
     <body onload="communicatie.init()">
-        <h1><span id="title">Index</span><span class="icons"></span><span onclick="javascript:communicatie.show_page('channels.html',  {'read_channels': null, 'read_users': null});document.getElementById('title').textContent = 'Index'">🏠</span><span onclick="window.location.replace('index.html')">&#x1F6AA;</span></h1>
+        <h1>
+            <span id="title">Index</span>
+            <span class="icons">
+                <span id="user_icon" onclick="javascript:communicatie.manage_users()" hidden>👤</span>
+                <span onclick="javascript:communicatie.show_page('channels.html',  {'read_channels': null, 'read_users': null});document.getElementById('title').textContent = 'Index'">🏠</span>
+                <span onclick="window.location.replace('index.html')">&#x1F6AA;</span>
+            </span>
+        </h1>
         <div id="error" hidden></div>
         <div id="page"></div>
     </body>

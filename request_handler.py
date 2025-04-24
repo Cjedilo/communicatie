@@ -49,6 +49,10 @@ class RequestHandler:
                     response = await self.database.login(params["user_name"], params["password"])
                 case "read_profiles":
                     response = await self.database.read_profiles(params)
+                case "read_members":
+                    response = await self.database.read_members(params)
+                case "set_member":
+                    response = await self.database.set_member(params["channel"], params["user"], params["is_member"], private_id)
                 case _:
                     response = {
                         "error": "request not suported"
