@@ -104,10 +104,9 @@ var communicatie = (function(){
         div.appendChild(inner_div);
         messages.appendChild(div);
         
-        request("read_channel", {
-            id: message.id,
+        request("subscribe", {
+            channel: message.id,
         });
-
     }
 
     function reply(element) {
@@ -156,24 +155,24 @@ var communicatie = (function(){
                 break;
             case "read_channels":
                 list = document.getElementById("channels");
-                for (const channel in data.value) {
-                    add_channel(list, data.value[channel]);
+                for (channel of data.value) {
+                    add_channel(list, channel);
                 }
 
                 break;
             case "read_users":
                 list = document.getElementById("users");
-                for (const user in data.value) {
+                for (user of data.value) {
                     item = document.createElement("li");
-                    item.dataset.id = data.value[user].id;
+                    item.dataset.id = user.id;
                     link = document.createElement("a")
-                    link.setAttribute("href", `javascript:communicatie.show_page('user.html',  {'read_user': {'id': '${data.value[user].id}'}})`);
-                    link.appendChild(document.createTextNode(data.value[user].name));
+                    link.setAttribute("href", `javascript:communicatie.show_page('user.html',  {'read_user': {'id': '${user.id}'}})`);
+                    link.appendChild(document.createTextNode(user.name));
                     item.appendChild(link);
-                    if(data.value[user].id === public_id) {
+                    if(user.id === public_id) {
                         span = document.createElement("span");
                         span.setAttribute("class", "trash");
-                        span.setAttribute("onclick", `communicatie.delete_user('${data.value[user].id}')`);
+                        span.setAttribute("onclick", `communicatie.delete_user('${user.id}')`);
                         span.innerHTML = "&#x1F5D1;";
                         item.appendChild(span);
                     }
@@ -182,19 +181,23 @@ var communicatie = (function(){
 
                 break;
             case "read_channel":
-                if(data.value.channel_name) {
-                    header = document.getElementById("title");
-                    header.textContent = data.value.channel_name;
-                    parent = document.getElementById("messages");
-                    if(!data.value.properties.public && data.value.owner === public_id) {
-                        document.getElementById("user_icon").hidden = false;
-                    }
-                } else {
-                    parent = document.querySelector(`[data-id*="${data.value.parent}"]`);
+                header = document.getElementById("title");
+                header.textContent = data.value.channel_name;
+                if(!data.value.properties.public && data.value.owner === public_id) {
+                    document.getElementById("user_icon").hidden = false;
                 }
-
-                for(message in data.value.messages) {
-                    append_message(parent, data.value.messages[message]);
+                request("subscribe", {
+                    channel: data.value.id,
+                });
+                break;
+            case "subscribe":
+                for(message of data.value) {
+                    if(message.parent === channel_id) {
+                        parent = document.getElementById("messages");
+                    } else {
+                        parent = document.querySelector(`[data-id*="${message.parent}"]`);
+                    }
+                    append_message(parent, message);
                 }
                 request_user_profiles();
                 break;
@@ -251,7 +254,8 @@ var communicatie = (function(){
                 break;
             case "read_user":
                 document.getElementById("title").textContent = data.value.name;
-                document.getElementById("avatar").src = data.value.avatar;
+                document.getElementById("avatar").src = data.value.avatar ? data.value.avatar : "img/unknown.png";
+                document.getElementById("new_avatar").hidden = document.getElementById("submit_avatar").hidden = (data.value.id !== public_id);
                 document.getElementById("number_of_messages").value = data.value.nr_messages;
                 break;
             case "read_members":
@@ -265,7 +269,7 @@ var communicatie = (function(){
                     item.dataset.id = user.id;
                     item.setAttribute("draggable", "true");
                     img = document.createElement("img");
-                    img.src = user.avatar;
+                    img.src = user.avatar ? user.avatar : "img/unknown.png";
                     item.appendChild(img);
                     span = document.createElement("span");
                     span.textContent = user.name;
@@ -278,7 +282,7 @@ var communicatie = (function(){
                     item.dataset.id = user.id;
                     item.setAttribute("draggable", "true");
                     img = document.createElement("img");
-                    img.src = user.avatar;
+                    img.src = user.avatar ? user.avatar : "img/unknown.png";
                     item.appendChild(img);
                     span = document.createElement("span");
                     span.textContent = user.name;
@@ -488,6 +492,10 @@ var communicatie = (function(){
         event.dataTransfer.effectAllowed = "move";
     }
 
+    function unsubscribe_all() {
+        request("unsubscribe_all");
+    }
+    
     return {
         init: init,
         create_channel: create_channel,
@@ -505,5 +513,6 @@ var communicatie = (function(){
         manage_users: manage_users,
         member: member,
         drag_member: drag_member,
+        unsubscribe_all: unsubscribe_all,
     };
 })();

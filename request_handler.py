@@ -1,8 +1,10 @@
+from collections import defaultdict
 import os
 import uuid
 import postgres
 import json
 import logging
+import aiohttp
 
 from datetime import datetime
 from uuid import UUID
@@ -16,10 +18,15 @@ class JSONEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
     
 class RequestHandler:
+    subscribed = defaultdict(set)
+
     def __init__(self):
         self.database = postgres.Postgres()
+        
+    async def subscribe(self, channel_id, ws):
+        RequestHandler.subscribed[channel_id].add(ws)
 
-    async def handle(self, request):
+    async def handle(self, request, ws):
             await self.database.init()
 
             data = json.loads(request)
@@ -43,6 +50,14 @@ class RequestHandler:
                     response = await self.database.delete_user(params['id'], private_id)
                 case "message":
                     response = await self.database.message(params["message"], params.get("image"), params["channel"], params["user"])
+                    listeners = RequestHandler.subscribed[params["channel"]].copy()
+                    for listener in listeners:
+                        if listener != ws:
+                            try:
+                                await listener.send_str(json.dumps({"response": "message", "value": response}, cls=JSONEncoder))    
+                            except aiohttp.client_exceptions.ClientConnectionResetError as e:
+                                RequestHandler.subscribed[params["channel"]].remove(listener)
+
                 case "read_channel":
                     response = await self.database.channel(params["id"])
                 case "login":
@@ -53,6 +68,14 @@ class RequestHandler:
                     response = await self.database.read_members(params)
                 case "set_member":
                     response = await self.database.set_member(params["channel"], params["user"], params["is_member"], private_id)
+                case "subscribe":
+                    await self.subscribe(params["channel"], ws)
+                    response = await self.database.read_messages(params["channel"])
+                case "unsubscribe_all":
+                    for channel in RequestHandler.subscribed:
+                        if ws in RequestHandler.subscribed[channel]:
+                            RequestHandler.subscribed[channel].remove(ws)
+                    response = True
                 case _:
                     response = {
                         "error": "request not suported"

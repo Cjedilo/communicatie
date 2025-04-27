@@ -78,7 +78,7 @@ async def websocket_handler(request):
 
     async for msg in ws:
         if msg.type == web.WSMsgType.TEXT:
-            response_string = await handler.handle(msg.data)
+            response_string = await handler.handle(msg.data, ws)
             logging.info(f"sending: {response_string}")
             await ws.send_str(response_string)
     return ws
