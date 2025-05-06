@@ -1,18 +1,26 @@
 #!venv/bin/python
 
+import argparse
+import asyncio
 import logging
 import mimetypes
 import pathlib
 import ssl
+
+import aiohttp
+from peers import Peers
+import postgres
 import request_handler
 import jinja2
 import aiohttp_jinja2
 import os
 
 from aiohttp import web
+from setting import Settings
 
 routes = web.RouteTableDef()
-handler = request_handler.RequestHandler()
+handler = None
+peer_handler = None
 
 @routes.get('/')
 @routes.get('/index.html')
@@ -27,7 +35,7 @@ async def get_stylesheet(request):
 
 @routes.get('/communicatie.js')
 async def get_javascript(request):
-    response = aiohttp_jinja2.render_template("communicatie.js", request, context={})
+    response = aiohttp_jinja2.render_template("communicatie.js", request, context={"ws_address": "ws"})
     response.headers['content-type'] = 'text/javascript'
     return response
 
@@ -77,8 +85,19 @@ async def websocket_handler(request):
     await ws.prepare(request)
 
     async for msg in ws:
-        if msg.type == web.WSMsgType.TEXT:
+        if msg.type == web.WSMsgType.TEXT:  
             response_string = await handler.handle(msg.data, ws)
+            logging.info(f"sending: {response_string}")
+            await ws.send_str(response_string)
+    return ws
+
+@routes.get('/peer')
+async def peer_websocket(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    async for msg in ws:
+        if msg.type == web.WSMsgType.TEXT:
+            response_string = await peer_handler.handle(msg.data, ws)
             logging.info(f"sending: {response_string}")
             await ws.send_str(response_string)
     return ws
@@ -92,14 +111,50 @@ def make_ssl_context():
 
     return ssl_context
 
-def main():
+def args_parse():
+    parser = argparse.ArgumentParser(
+                    prog='communication',
+                    description='Talk to others, keep your data.',
+                    epilog='Written by Bas')
+    parser.add_argument('-p', '--port', default=8181, type=int)
+    parser.add_argument('-d', '--database', default="postgresql://communicatie:communicatie@localhost/communicatie", type=str)
+    args = parser.parse_args()
+
+    Settings.port = args.port
+    Settings.db_connect = args.database
+    
+async def main():
+    global handler
+    global peer_handler
+    global routes
+
     logging.basicConfig(level=logging.INFO)
+    args_parse()
+
+    database = postgres.Postgres()
+    await database.init()
+    peers = Peers(database)
+    
+    handler = request_handler.RequestHandler(database, peers)
+    peer_handler = request_handler.PeerHandler(database, peers, handler)
 
     app = web.Application()
     app.add_routes(routes)
     aiohttp_jinja2.setup(app, loader=jinja2.FileSystemLoader(os.path.join(os.getcwd(), "templates")))
-    web.run_app(app, port=8181, ssl_context=make_ssl_context())
+
+    runner = aiohttp.web.AppRunner(app)
+    await runner.setup()
+    site = aiohttp.web.TCPSite(runner, port=Settings.port, ssl_context=make_ssl_context())    
+    await site.start()
+
+
+
+    await peers.init()
+
+    # wait forever
+    await asyncio.Event().wait()
+    
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

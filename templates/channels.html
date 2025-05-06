@@ -5,3 +5,10 @@
 <h2>Users</h2>
 <ul id="users">
 </ul>
+<h2>Peers</h2>
+<h3>This</h3>
+<label for="peer_name"><button class="send" onclick="communicatie.set_peer_name()">set name</button></label><input type="text" id="peer_name" placeholder="Your name"><input type="text" id="peer_address" disabled><button class="send" onclick="communicatie.set_peer_address()">overwrite address</button>
+<h3>Others</h3>
+<ul id="peers">
+</ul>
+<label for="add_peer"><button id="add_peer" class="send" onclick="communicatie.add_peer()">Add</button></label><input type="text" placeholder="New peer address" id="new_peer_address"><br>

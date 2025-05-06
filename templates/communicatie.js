@@ -2,8 +2,8 @@ var communicatie = (function(){
     let needed_profiles = new Set();
     let known_profiles = {};
     let public_id = private_id = null;
-    let channel_id = null;
-    let socket = new WebSocket("wss://www.appelo.nl:8181/ws");
+    let channel_id = channel_peer_id = null;
+    let socket = new WebSocket("{{ ws_address }}");
     
     socket.onopen = function(_event) {
         console.log("socket open");
@@ -17,7 +17,7 @@ var communicatie = (function(){
         item = document.createElement("li");
         item.dataset.id = channel.id;
         link = document.createElement("a");
-        link.setAttribute("href", `javascript:communicatie.set_channel_id("${channel.id}");communicatie.show_page("chat.html", {"read_channel":{"id": "${channel.id}"}})`);
+        link.setAttribute("href", `javascript:communicatie.set_channel_id("${channel.id}", null);communicatie.show_page("chat.html", {"read_channel":{"id": "${channel.id}"}})`);
         link.appendChild(document.createTextNode(channel.name));
         item.appendChild(link);
         span = document.createElement("span");
@@ -33,6 +33,22 @@ var communicatie = (function(){
             span.setAttribute("onclick", `communicatie.delete_channel('${channel.id}')`);
             span.innerHTML = "&#x1F5D1;";
             item.appendChild(span);
+        }
+        list.appendChild(item);
+    }
+    
+    function add_remote_channel(list, remote_id, channel) {
+        item = document.createElement("li");
+        item.dataset.id = channel.id;
+        link = document.createElement("a");
+        link.setAttribute("href", `javascript:communicatie.set_channel_id("${channel.id}", "${remote_id}");communicatie.show_page("chat.html", {"read_channel":{"id": "${channel.id}", "peer": "${remote_id}"}})`);
+        link.appendChild(document.createTextNode(channel.name));
+        item.appendChild(link);
+        span = document.createElement("span");
+        if(channel.properties.public) {
+            span.textContent = "🔓";
+        } else {
+            span.textContent = "🔒"; 
         }
         list.appendChild(item);
     }
@@ -147,7 +163,8 @@ var communicatie = (function(){
                 if(data.value.private_id) {
                     private_id = data.value.private_id;
                     public_id = data.value.public_id;
-                    show_page("channels.html", {"read_channels": null, "read_users": null});
+                    show_page("channels.html", {"read_channels": null, "read_users": null, "read_peers": null,
+                    });
                 } else {
                     show_error("Login failed.");
                 }
@@ -155,8 +172,18 @@ var communicatie = (function(){
                 break;
             case "read_channels":
                 list = document.getElementById("channels");
-                for (channel of data.value) {
+                for (channel of data.value.local) {
                     add_channel(list, channel);
+                }
+                for (remote_id in data.value.remote) {
+                    li = document.createElement("li");
+                    li.textContent = remote_id;
+                    list.appendChild(li);
+                    remote_list = document.createElement("ul");
+                    li.appendChild(remote_list);
+                    for (channel of data.value.remote[remote_id]) {
+                        add_remote_channel(remote_list, remote_id, channel);
+                    }
                 }
 
                 break;
@@ -290,9 +317,38 @@ var communicatie = (function(){
                     none_members.appendChild(item);
                 }
                 break;
+            case "read_peers":
+                peers = document.getElementById("peers");
+                for(peer of data.value.others) {
+                    update_peer(peer, peers);
+                }
+                document.getElementById("peer_name").value = data.value.me.name;
+                document.getElementById("peer_address").value = data.value.me.address;
+                break;
+            case "add_peer":
+                update_peer(data.value);
+
+                break;
         }
             
     };    
+
+    function update_peer(peer, peers) {
+        peers = peers || document.getElementById("peers");
+        item = document.querySelector(`[data-id*="${peer.id}"]`);
+        if(!item) {
+            item = document.createElement("li");
+            peers.appendChild(item);
+            item.dataset.id = peer.id;
+        }
+        item.textContent = peer.name;
+        if(peer.connected) {
+            item.textContent += " 👍";
+        } else {
+            item.textContent += " 👎";
+        }
+
+    }
 
     function request(request, parameters) {
         socket.send(JSON.stringify({
@@ -314,7 +370,7 @@ var communicatie = (function(){
     function create_user() {
         request("create_user", {
             user_name: document.getElementById('new_user').value,
-            password: document.getElementById('password').value,
+            password: document.getElementById('new_password').value,
         });
     }
 
@@ -407,8 +463,9 @@ var communicatie = (function(){
         return channel_id;
     }
 
-    function set_channel_id(id) {
+    function set_channel_id(id, peer_id) {
         channel_id = id;
+        channel_peer_id = peer_id;
     }
 
     function set_avatar() {
@@ -496,6 +553,26 @@ var communicatie = (function(){
         request("unsubscribe_all");
     }
     
+    function set_peer_name() {
+        peer_name = document.getElementById("peer_name").value;
+        request("set_peer_name", peer_name);
+    }
+
+    function set_peer_address() {
+        if(document.getElementById("peer_address").disabled) {
+            document.getElementById("peer_address").disabled = false;
+            return;
+        }
+        peer_address = document.getElementById("peer_address").value;
+        document.getElementById("peer_address").disabled = true;
+        request("set_peer_address", peer_address);
+    }
+
+    function add_peer() {
+        peer_address = document.getElementById("new_peer_address").value;
+        request("add_peer", peer_address);
+    }
+
     return {
         init: init,
         create_channel: create_channel,
@@ -514,5 +591,8 @@ var communicatie = (function(){
         member: member,
         drag_member: drag_member,
         unsubscribe_all: unsubscribe_all,
+        set_peer_name: set_peer_name,
+        set_peer_address: set_peer_address,
+        add_peer: add_peer,
     };
 })();

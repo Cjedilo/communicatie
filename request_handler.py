@@ -1,41 +1,38 @@
 from collections import defaultdict
+import common
 import os
+import ssl
 import uuid
+import peers
 import postgres
 import json
 import logging
 import aiohttp
 
-from datetime import datetime
-from uuid import UUID
+from websockets.asyncio.client import connect
 
-class JSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, UUID):
-            return str(obj)
-        if isinstance(obj, datetime):
-            return obj.strftime("%m/%d/%Y, %H:%M:%S")
-        return json.JSONEncoder.default(self, obj)
-    
+
 class RequestHandler:
     subscribed = defaultdict(set)
 
-    def __init__(self):
-        self.database = postgres.Postgres()
+    def __init__(self, database: postgres.Postgres, peers: peers.Peers):
+        self.database = database
+        self.peers = peers
         
     async def subscribe(self, channel_id, ws):
         RequestHandler.subscribed[channel_id].add(ws)
 
     async def handle(self, request, ws):
-            await self.database.init()
-
             data = json.loads(request)
             logging.info(f'Received: {data}')
             params = data.get('parameters')
-            private_id = data['private_id']
+            private_id = data.get('private_id')
             match data["request"]:
                 case "read_channels":
-                    response = await self.database.get_channels(private_id)
+                    response = {
+                        "local": await self.database.get_channels(private_id),
+                        "remote": await self.peers.get_channels(private_id),
+                    }
                 case "read_users":
                     response = await self.database.get_users()
                 case "read_user":
@@ -54,7 +51,7 @@ class RequestHandler:
                     for listener in listeners:
                         if listener != ws:
                             try:
-                                await listener.send_str(json.dumps({"response": "message", "value": response}, cls=JSONEncoder))    
+                                await listener.send_str(json.dumps({"response": "message", "value": response}, cls=common.JSONEncoder))    
                             except aiohttp.client_exceptions.ClientConnectionResetError as e:
                                 RequestHandler.subscribed[params["channel"]].remove(listener)
 
@@ -76,11 +73,19 @@ class RequestHandler:
                         if ws in RequestHandler.subscribed[channel]:
                             RequestHandler.subscribed[channel].remove(ws)
                     response = True
+                case "read_peers":
+                    response = await self.peers.get_peers()
+                case "set_peer_name":
+                    response = await self.database.set_peer_name(params, private_id)
+                case "set_peer_address":
+                    response = await self.database.set_peer_address(params, private_id)
+                case "add_peer":
+                    response = await self.peers.add(params)
                 case _:
                     response = {
                         "error": "request not suported"
                     }
-            return json.dumps({"response": data["request"], "value": response}, cls=JSONEncoder)
+            return json.dumps({"response": data["request"], "value": response}, cls=common.JSONEncoder)
 
     async def set_avatar(self, image, private_id):
         img_content = image.file.read()
@@ -102,3 +107,41 @@ class RequestHandler:
         
         return json.dumps(full_name)
 
+
+class PeerHandler:
+    def __init__(self, database, peers, handler):
+        self.database = database
+        self.peers = peers
+        self.clients = {}
+
+    async def handle(self, request, ws):
+        await self.database.init()
+
+        data = json.loads(request)
+        logging.info(f'Received: {data}')
+        params = data.get('parameters')
+        match data["request"]:
+            case "peer_details":
+                response = (await self.peers.get_peers())["me"]
+            case "read_channels":
+                response = await self.database.get_channels_for_peer(self.clients[ws], params["public_id"])
+            case "authenticate":
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                async with connect(params["address"], ssl=ctx) as websocket:
+                    await websocket.send(json.dumps({"request": "verify", "request_id": str(uuid.uuid4()), "parameters": {"address": await self.database.get_peer_address() or await self.peers.guess_peer_address()}}))
+                    response = json.loads(await websocket.recv())
+                    logging.info(f"checking: {response} {params}")
+                    if response["value"] == params["secret"]:
+                        self.clients[ws] = await self.database.get_peer_id(params["address"])
+                        response = True
+                    else:
+                        response = False
+            case "verify":
+                response = self.peers.get_secret(params["address"])
+            case _:
+                response = {
+                    "error": "request not suported"
+                }
+        return json.dumps({"response": data["request"], "request_id": data["request_id"], "value": response}, cls=common.JSONEncoder)

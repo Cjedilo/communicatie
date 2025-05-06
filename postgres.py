@@ -3,13 +3,15 @@ import asyncpg
 import hashlib
 import logging
 
+from setting import Settings
+
 class Postgres:
     def __init__(self):
         self.pool = None
 
     async def init(self):
         if self.pool == None:
-            self.pool = await asyncpg.create_pool('postgresql://communicatie:communicatie@localhost/communicatie')
+            self.pool = await asyncpg.create_pool(Settings.db_connect)
     
     async def get_channels(self, private_id):
         async with self.pool.acquire() as connection:
@@ -29,7 +31,7 @@ class Postgres:
                     'name': row['text'],
                     'id': row['id'],
                     'owner': row['send_by'],
-                    'properties': row['properties'],
+                    'properties': json.loads(row['properties']),
                 })
             
             return channels
@@ -81,20 +83,21 @@ class Postgres:
 
     async def create_user(self, user_name, password):
         try:
+            user_id = None
             async with self.pool.acquire() as connection:
                 user_id = await connection.fetchval('''
-                    INSERT INTO users (name, password) VALUES($1, $2) RETURNING private_id
+                    INSERT INTO users (name, password) VALUES($1, $2) RETURNING public_id
                 ''', user_name, 'fake_password')
                 logging.info(password + str(user_id)) 
-                await self.connection.execute('''
-                    UPDATE users set password = $1 WHERE id = $2
+                await connection.execute('''
+                    UPDATE users set password = $1 WHERE public_id = $2
                 ''', hashlib.md5((password + str(user_id)).encode()).hexdigest(), user_id
                 )
 
-                return {
-                    "user_name": user_name,
-                    "id": user_id,
-                }
+            return {
+                "user_name": user_name,
+                "id": user_id,
+            }
         except asyncpg.exceptions.UniqueViolationError:
             return {
                 "error": "Name '{user_name}' does already exist."
@@ -195,3 +198,77 @@ class Postgres:
     async def set_avatar(self, private_id, file):
         async with self.pool.acquire() as connection:
             await connection.execute("UPDATE users set avatar = $2 where private_id = $1", private_id, file)
+
+    async def read_peers(self):
+        async with self.pool.acquire() as connection:
+            return await connection.fetch("SELECT id, name, address, subscribed from peers order by created DESC")
+        
+    async def get_peer_name(self):
+        async with self.pool.acquire() as connection:
+            return await connection.fetchval("SELECT value FROM settings where key='peer_name'")
+        
+    async def get_peer_address(self):
+        async with self.pool.acquire() as connection:
+            return await connection.fetchval("SELECT value FROM settings where key='peer_address'")
+        
+        
+    async def set_peer_name(self, name, private_id):
+        async with self.pool.acquire() as connection:
+            result = await connection.fetchrow("SELECT public_id FROM users where private_id = $1", private_id)
+            if result:
+                await connection.execute("INSERT INTO settings (key, value) VALUES ('peer_name', $1) ON CONFLICT (key) DO UPDATE SET value = $1", name)
+                return True
+            
+        return False
+
+    async def set_peer_address(self, address, private_id):
+        async with self.pool.acquire() as connection:
+            result = await connection.fetchrow("SELECT public_id FROM users where private_id = $1", private_id)
+            if result:
+                await connection.execute("INSERT INTO settings (key, value) VALUES ('peer_address', $1) ON CONFLICT (key) DO UPDATE SET value = $1", address)
+                return True
+            
+        return False
+
+    async def add_peer(self, address):
+        async with self.pool.acquire() as connection:
+            return await connection.fetchval("INSERT INTO peers (address, subscribed) VALUES($1, TRUE) RETURNING id", address)
+        
+    async def update_peer(self, peer):
+        async with self.pool.acquire() as connection:
+            await connection.execute("UPDATE peers set name = $1, address = $2 where id = $3", peer.name, peer.address, peer.id)            
+
+    async def get_peer_id(self, address):
+        async with self.pool.acquire() as connection:
+            peer_id = await connection.fetchval("SELECT id FROM peers where address = $1", address)
+            if not peer_id:
+                peer_id = await connection.fetchval("INSERT INTO peers (address, subscribed) VALUES($1, FALSE) RETURNING id", address)
+            return peer_id
+        
+    async def get_channels_for_peer(self, peer_id, peer_user):
+        channels = []
+
+        async with self.pool.acquire() as connection:
+            public = await connection.fetch("SELECT id, text, send_by, properties FROM messages where channel is null and (properties->>'public')::boolean IS TRUE")
+            for row in public:
+                channels.append({
+                    'name': row['text'],
+                    'id': row['id'],
+                    'owner': row['send_by'],
+                    'properties': json.loads(row['properties']),
+                })
+            
+            members = await connection.fetch("SELECT id, text, send_by, properties FROM messages JOIN channel_member on channel_member.channel = messages.id where channel_member.peer = $1 and channel_member.member = $2 and messages.channel is null and (messages.properties->>'public')::boolean IS FALSE", peer_id, peer_user)
+            for row in members:
+                channels.append({
+                    'name': row['text'],
+                    'id': row['id'],
+                    'owner': row['send_by'],
+                    'properties': json.loads(row['properties']),
+                })
+        
+            return channels
+
+    async def get_public_id(self, private_id):
+        async with self.pool.acquire() as connection:
+            return await connection.fetchval("SELECT public_id FROM users where private_id = $1", private_id)
