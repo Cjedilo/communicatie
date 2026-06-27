@@ -2,6 +2,7 @@ import json
 import asyncpg
 import hashlib
 import logging
+from datetime import datetime
 
 from setting import Settings
 
@@ -175,13 +176,23 @@ class Postgres:
     
     async def read_messages(self, chat_id):
         async with self.pool.acquire() as connection:
-            return [
+            local = [
                     {"id": row["id"], "message" : row["text"], "image" : row["image"], "send_by": row["send_by"], "date": row["created"], "parent": row["channel"]}
                         for row in reversed(await connection.fetch(
-                            "SELECT id, text, image, send_by, created, channel FROM messages where channel = $1 ORDER By created DESC LIMIT 25", chat_id
+                            "SELECT id, text, image, send_by, created, channel FROM messages where channel = $1 ORDER BY created DESC LIMIT 25", chat_id
+                        ))
+                ]
+            remote = [
+                    {"id": row["id"], "peer": row["peer"]}
+                        for row in reversed(await connection.fetch(
+                            "SELECT id, peer FROM remote_messages where channel = $1 ORDER BY created DESC LIMIT 25", chat_id
                         ))
                 ]
 
+            return {
+                "local": local,
+                "remote": remote,
+            }
 
     async def message(self, message, image, channel, user_id):
         async with self.pool.acquire() as connection:
@@ -194,6 +205,12 @@ class Postgres:
                 "parent": channel,
                 "date": result["created"]
             }
+
+    async def remote_message(self, message_id, peer, channel, user_id, created):
+        async with self.pool.acquire() as connection:
+            await connection.execute("INSERT INTO remote_messages (id, peer, channel, send_by, created) VALUES($1, $2, $3, $4, $5)", message_id, peer, channel, user_id, datetime.strptime(created, '%d/%m/%Y, %H:%M:%S.%f'))
+            return True
+        
     
     async def set_avatar(self, private_id, file):
         async with self.pool.acquire() as connection:
@@ -211,11 +228,14 @@ class Postgres:
         async with self.pool.acquire() as connection:
             return await connection.fetchval("SELECT value FROM settings where key='peer_address'")
         
+    async def get_owner_id(self):
+        async with self.pool.acquire() as connection:
+            return await connection.fetchval("SELECT value FROM settings where key='owner'")
         
     async def set_peer_name(self, name, private_id):
         async with self.pool.acquire() as connection:
             result = await connection.fetchrow("SELECT public_id FROM users where private_id = $1", private_id)
-            if result:
+            if result and result["public_id"] == await self.get_owner_id():
                 await connection.execute("INSERT INTO settings (key, value) VALUES ('peer_name', $1) ON CONFLICT (key) DO UPDATE SET value = $1", name)
                 return True
             
@@ -224,7 +244,7 @@ class Postgres:
     async def set_peer_address(self, address, private_id):
         async with self.pool.acquire() as connection:
             result = await connection.fetchrow("SELECT public_id FROM users where private_id = $1", private_id)
-            if result:
+            if result and result["public_id"] == await self.get_owner_id():
                 await connection.execute("INSERT INTO settings (key, value) VALUES ('peer_address', $1) ON CONFLICT (key) DO UPDATE SET value = $1", address)
                 return True
             

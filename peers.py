@@ -82,11 +82,16 @@ class Peers:
         name = socket.gethostbyaddr(ip)
 
         return f"wss://{name[0] if name[0] else ip}{f':{Settings.port}' if Settings.port != 80 else ''}/peer"
-
+    
+    async def get_local_address(self):
+        address = await self.database.get_peer_address()
+        if not address:
+            address = await self.guess_peer_address()
+        return address
+    
     async def get_peers(self):
         name = await self.database.get_peer_name()
-        address = await self.database.get_peer_address() or await self.guess_peer_address()
-
+        address = await self.get_local_address() 
         return {
             "me": {
                 "name": name,
@@ -100,7 +105,7 @@ class Peers:
         return self.secrets.get(address, None)
     
     async def authenticate_peer(self, peer, websocket):
-        my_address = await self.database.get_peer_address() or await self.guess_peer_address()
+        my_address = await self.get_local_address()
         secret = str(uuid.uuid4())
         logging.info(f"Generated secret for peer {peer.address}: {secret}")
         self.secrets[peer.address] = secret
@@ -167,8 +172,16 @@ class Peers:
         return await self.request(id, {"request": "peer_details"})
 
     async def get_channels(self, private_id):
-        async def fetch_channel(peer_id, public_id):
-            return {str(peer_id): (await self.request(peer_id, {"request": "read_channels", "parameters": {"public_id": public_id}})).get("value", [])}
+        async def fetch_channel(peer, public_id):
+            return {
+                "peer_id": peer.id,
+                "peer_name": peer.name,
+                "channels": (await self.request(peer.id, {"request": "read_channels", "parameters": {"public_id": public_id}})).get("value", [])
+            } if peer.connected else {
+                "peer_id": peer.id,
+                "peer_name": peer.name,
+                "channels": []
+            }
 
         public_id = await self.database.get_public_id(private_id)
         if not public_id:
@@ -176,12 +189,25 @@ class Peers:
             return None
 
         tasks = []
-        for peer_id in self.peers.keys():
-            tasks.append(asyncio.create_task(fetch_channel(peer_id, public_id)))
+        for peer in self.peers.values():
+            tasks.append(asyncio.create_task(fetch_channel(peer, public_id)))
         await asyncio.gather(*tasks)            
 
-        channels = {}
-        for result in tasks:
-            channels.update(result.result())
-        return channels
+        return [result.result() for result in tasks]
+    
+    async def get_channel(self, peer_id, channel_id):
+        if peer_id not in self.peers:
+            logging.error(f"Peer {peer_id} not found")
+            return None
+
+        peer = self.peers[peer_id]
+        if peer.connected:
+            request = {"request": "read_channel", "parameters": {"id": channel_id}}
+            logging.info(f"Sending request to {peer_id}: {request}")
+            response = await self.request(peer_id, request)
+            if response and response.get("response") == "read_channel":
+                return response.get("value")
+            else:
+                logging.error(f"Error getting channel {channel_id} from peer {peer_id}: {response}")
+        return None
     

@@ -2,7 +2,8 @@ var communicatie = (function(){
     let needed_profiles = new Set();
     let known_profiles = {};
     let public_id = private_id = null;
-    let channel_id = channel_peer_id = null;
+    let channel_peer_id = null;
+    let channel_id = null;
     let socket = new WebSocket("{{ ws_address }}");
     
     socket.onopen = function(_event) {
@@ -37,11 +38,11 @@ var communicatie = (function(){
         list.appendChild(item);
     }
     
-    function add_remote_channel(list, remote_id, channel) {
+    function add_remote_channel(list, peer, channel) {
         item = document.createElement("li");
         item.dataset.id = channel.id;
         link = document.createElement("a");
-        link.setAttribute("href", `javascript:communicatie.set_channel_id("${channel.id}", "${remote_id}");communicatie.show_page("chat.html", {"read_channel":{"id": "${channel.id}", "peer": "${remote_id}"}})`);
+        link.setAttribute("href", `javascript:communicatie.set_channel_id("${channel.id}", "${peer.peer_id}");communicatie.show_page("chat.html", {"read_channel":{"id": "${channel.id}", "peer": "${peer.peer_id}"}})`);
         link.appendChild(document.createTextNode(channel.name));
         item.appendChild(link);
         span = document.createElement("span");
@@ -75,7 +76,7 @@ var communicatie = (function(){
         message_header.appendChild(span);
         span = document.createElement("span");
         span.setAttribute("class", "message_date");
-        span.appendChild(document.createTextNode("@" +  message.date));
+        span.appendChild(document.createTextNode("@" +  message.date.split(".")[0]));
         message_header.appendChild(span);
 
         return message_header;
@@ -122,6 +123,7 @@ var communicatie = (function(){
         
         request("subscribe", {
             channel: message.id,
+            peer: channel_peer_id,
         });
     }
 
@@ -175,14 +177,14 @@ var communicatie = (function(){
                 for (channel of data.value.local) {
                     add_channel(list, channel);
                 }
-                for (remote_id in data.value.remote) {
+                for (peer of data.value.remote) {
                     li = document.createElement("li");
-                    li.textContent = remote_id;
+                    li.textContent = peer.peer_name;
                     list.appendChild(li);
                     remote_list = document.createElement("ul");
                     li.appendChild(remote_list);
-                    for (channel of data.value.remote[remote_id]) {
-                        add_remote_channel(remote_list, remote_id, channel);
+                    for (channel of peer.channels) {
+                        add_remote_channel(remote_list, peer, channel);
                     }
                 }
 
@@ -215,6 +217,7 @@ var communicatie = (function(){
                 }
                 request("subscribe", {
                     channel: data.value.id,
+                    peer: channel_peer_id,
                 });
                 break;
             case "subscribe":
@@ -442,6 +445,7 @@ var communicatie = (function(){
             "image": img_src,
             "channel": parent,
             "user": private_id,
+            "peer": channel_peer_id,
         });
 
         if(parent == channel_id) {

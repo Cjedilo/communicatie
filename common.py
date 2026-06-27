@@ -10,6 +10,6 @@ class JSONEncoder(json.JSONEncoder):
         if isinstance(obj, uuid.UUID) or isinstance(obj, asyncpg.pgproto.pgproto.UUID):  
             return str(obj)
         if isinstance(obj, datetime):
-            return obj.strftime("%m/%d/%Y, %H:%M:%S")
+            return obj.strftime("%m/%d/%Y, %H:%M:%S.%f")
         return json.JSONEncoder.default(self, obj)
     

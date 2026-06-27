@@ -14,12 +14,22 @@ from websockets.asyncio.client import connect
 
 class RequestHandler:
     subscribed = defaultdict(set)
+    peer_subscribed = defaultdict(set)
 
     def __init__(self, database: postgres.Postgres, peers: peers.Peers):
         self.database = database
         self.peers = peers
         
-    async def subscribe(self, channel_id, ws):
+    async def subscribe(self, channel_id, peer_id, ws):
+        if peer_id:
+            await self.peers.request(peer_id, {
+                "request": "subscribe",
+                "parameters": {
+                    "channel": channel_id,
+                    "peer": await self.peers.get_local_address(),
+                }
+            })
+
         RequestHandler.subscribed[channel_id].add(ws)
 
     async def handle(self, request, ws):
@@ -46,17 +56,40 @@ class RequestHandler:
                 case "delete_user":
                     response = await self.database.delete_user(params['id'], private_id)
                 case "message":
-                    response = await self.database.message(params["message"], params.get("image"), params["channel"], params["user"])
-                    listeners = RequestHandler.subscribed[params["channel"]].copy()
-                    for listener in listeners:
-                        if listener != ws:
+                    if peer := params.get("peer"):
+                        local_message = await self.database.message(params["message"], params.get("image"), params["channel"], params["user"])
+                        response = await self.peers.request(peer, {
+                            "request": "message", 
+                            "parameters": {
+                                "id": local_message["id"],
+                                "peer": await self.peers.get_local_address(),
+                                "channel": params["channel"],
+                                "send_by": local_message["send_by"],
+                                "created": local_message["date"],
+                                }
+                        })
+                    else:
+                        response = await self.database.message(params["message"], params.get("image"), params["channel"], params["user"])
+                        listeners = RequestHandler.subscribed[params["channel"]].copy()
+                        for listener in listeners:
+                            if listener != ws:
+                                try:
+                                    await listener.send_str(json.dumps({"response": "message", "value": response}, cls=common.JSONEncoder))    
+                                except aiohttp.client_exceptions.ClientConnectionResetError as e:
+                                    RequestHandler.subscribed[params["channel"]].remove(listener)
+
+                        listeners = RequestHandler.peer_subscribed[params["channel"]].copy()
+                        for listener in listeners:
                             try:
-                                await listener.send_str(json.dumps({"response": "message", "value": response}, cls=common.JSONEncoder))    
+                                await listener.send_str(json.dumps({"response": "remote_message", "value": response}, cls=common.JSONEncoder))    
                             except aiohttp.client_exceptions.ClientConnectionResetError as e:
-                                RequestHandler.subscribed[params["channel"]].remove(listener)
+                                RequestHandler.peer_subscribed[params["channel"]].remove(listener)
 
                 case "read_channel":
-                    response = await self.database.channel(params["id"])
+                    if peer := params.get("peer"):
+                        response = await self.peers.get_channel(peer, params["id"])
+                    else:
+                        response = await self.database.channel(params["id"])
                 case "login":
                     response = await self.database.login(params["user_name"], params["password"])
                 case "read_profiles":
@@ -66,8 +99,20 @@ class RequestHandler:
                 case "set_member":
                     response = await self.database.set_member(params["channel"], params["user"], params["is_member"], private_id)
                 case "subscribe":
-                    await self.subscribe(params["channel"], ws)
-                    response = await self.database.read_messages(params["channel"])
+                    peer = params.get("peer")
+                    await self.subscribe(params["channel"], peer, ws)
+                    if not peer:
+                        response = await self.database.read_messages(params["channel"])
+                        for message in response.get("remote", []):
+                            await self.peers.request(message["peer"], {
+                                "request": "get_message",
+                                "parameters": {
+                                    "id": message["id"],
+                                }
+                            })
+                    else:
+                        response = True
+                        
                 case "unsubscribe_all":
                     for channel in RequestHandler.subscribed:
                         if ws in RequestHandler.subscribed[channel]:
@@ -109,7 +154,7 @@ class RequestHandler:
 
 
 class PeerHandler:
-    def __init__(self, database, peers, handler):
+    def __init__(self, database: postgres.Postgres, peers, handler):
         self.database = database
         self.peers = peers
         self.clients = {}
@@ -125,6 +170,8 @@ class PeerHandler:
                 response = (await self.peers.get_peers())["me"]
             case "read_channels":
                 response = await self.database.get_channels_for_peer(self.clients[ws], params["public_id"])
+            case "read_channel":
+                response = await self.database.channel(params["id"])                
             case "authenticate":
                 ctx = ssl.create_default_context()
                 ctx.check_hostname = False
@@ -140,6 +187,25 @@ class PeerHandler:
                         response = False
             case "verify":
                 response = self.peers.get_secret(params["address"])
+            case "message":
+                response = await self.database.remote_message(
+                    params["id"],
+                    params["peer"],
+                    params["channel"],
+                    params["send_by"],
+                    params["created"],
+                )
+            case "subscribe":
+                RequestHandler.peer_subscribed[params["channel"]].add(ws)
+                response = await self.database.read_messages(params["channel"])
+            case "remote_message":
+                listeners = RequestHandler.subscribed[params["channel"]].copy()
+                for listener in listeners:
+                    try:
+                        await listener.send_str(json.dumps({"response": "remote_message", "value": params}, cls=common.JSONEncoder))    
+                    except aiohttp.client_exceptions.ClientConnectionResetError as e:
+                        RequestHandler.peer_subscribed[params["channel"]].remove(listener)
+                response = True
             case _:
                 response = {
                     "error": "request not suported"
