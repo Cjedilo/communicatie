@@ -1,14 +1,49 @@
-<h2>Channels</h2>
-<ul id="channels">
-</ul>
-<label for="channel_create"><button id="channel_create" class="send" onclick="communicatie.create_channel()">Create</button></label><input type="text" placeholder="New channel name" id="channel_name"> <select id="public"><option value="private">Private</option><option value="public">Public</option></select><br>
-<h2>Users</h2>
-<ul id="users">
-</ul>
-<h2>Peers</h2>
-<h3>This</h3>
-<label for="peer_name"><button class="send" onclick="communicatie.set_peer_name()">set name</button></label><input type="text" id="peer_name" placeholder="Your name"><input type="text" id="peer_address" disabled><button class="send" onclick="communicatie.set_peer_address()">overwrite address</button>
-<h3>Others</h3>
-<ul id="peers">
-</ul>
-<label for="add_peer"><button id="add_peer" class="send" onclick="communicatie.add_peer()">Add</button></label><input type="text" placeholder="New peer address" id="new_peer_address"><br>
+<section class="channels-page">
+
+    <div class="panel">
+        <h3>Channels</h3>
+        <ul id="channels_list" class="item-list"></ul>
+        <form id="create_channel_form">
+            <input type="text" id="channel_name" placeholder="New channel name" maxlength="128">
+            <label><input type="checkbox" id="channel_private"> Private</label>
+            <button type="submit">Create</button>
+        </form>
+    </div>
+
+    <div class="panel">
+        <h3>Users</h3>
+        <ul id="users_list" class="item-list"></ul>
+    </div>
+
+    <div class="panel" id="peers_panel">
+        <h3>Peers</h3>
+        <ul id="peers_list" class="item-list"></ul>
+
+        <div id="peer_admin" class="hidden">
+            <label class="field-label">Connect a server</label>
+            <form id="add_peer_form" class="inline-form">
+                <input type="text" id="peer_address_input" placeholder="wss://other-server:443" maxlength="256">
+                <button type="submit">Connect</button>
+            </form>
+
+            <label class="field-label">This server's name</label>
+            <form id="peer_name_form" class="inline-form">
+                <input type="text" id="peer_name_input" placeholder="My server" maxlength="128">
+                <button type="submit">Save</button>
+            </form>
+        </div>
+
+        <label class="field-label">This server's address <span class="hint">(share this to connect)</span></label>
+        <div id="peer_address_display" class="address-display hidden">
+            <span id="peer_address_value"></span>
+            <button id="peer_address_copy" type="button">Copy</button>
+        </div>
+        <div id="peer_admin_address" class="hidden">
+            <form id="peer_address_form" class="inline-form">
+                <input type="text" id="peer_address_self_input" placeholder="wss://this-server:443" maxlength="256">
+                <button type="submit">Set</button>
+            </form>
+        </div>
+    </div>
+
+</section>

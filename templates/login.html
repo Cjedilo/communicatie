@@ -1,12 +1,15 @@
-<h2>Login</h2>
-<form action="javascript:communicatie.login()">
-<label for="user_name">User:</label><input type="text" autocomplete="username" id="user_name" /><br />
-<label for="password">Password:</label><input type="password" autocomplete="current-password" id="password" /><br />
-<button type="submit" class="send">login</button>
-</form>
-<h2>Create</h2>
-<form>
-<label for="new_user">New user:</label><input type="text" autocomplete="username" id="new_user" /><br />
-<label for="new_password">Password:</label><input type="password" autocomplete="new-password" id="new_password" /><br />
-<button class="send" onclick="communicatie.create_user()">Create</button>
-</form>
+<section class="form-page">
+    <h2>Login</h2>
+    <form id="login_form">
+        <input type="text"     id="login_name"     placeholder="Username" autocomplete="username" required>
+        <input type="password" id="login_password" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit">Login</button>
+    </form>
+
+    <h2>Register</h2>
+    <form id="register_form">
+        <input type="text"     id="register_name"     placeholder="Username" autocomplete="username" required>
+        <input type="password" id="register_password" placeholder="Password (min 8 chars)" autocomplete="new-password" required>
+        <button type="submit">Register</button>
+    </form>
+</section>

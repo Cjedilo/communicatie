@@ -1,21 +1,42 @@
-<div id="user_manager" class="user_manager" hidden>
-    <table id="user_table" class="user_table">
-        <caption><span class="caption_icons"><span class="title">Add or remove users</span><span class="icons" onclick="document.getElementById('user_manager').hidden = true">✖</span></span></caption>
-        <thead>
-        <tr>
-            <th>Members</th>
-            <th>None Members</th>
-        </tr>
-        </thead>
-        <tbody id="user_table_body">
-            <tr ondragover="event.preventDefault();return false;">
-                <td ondrop="communicatie.member(event, true)"><ul id="members" class="user_list"></ul></td>
-                <td ondrop="communicatie.member(event, false)"><ul id="none-members" class="user_list"></ul></td>
-            </tr>
-        </tbody>
-    </table>
-</div>
-<div id="messages"></div>
-<br>
-<img id="image-root" class="message_image" hidden>
-<textarea id="message_text" ondrop="communicatie.image(event, 'root')"></textarea><button class="send" onclick="communicatie.add_message(communicatie.get_channel_id(), this.previousElementSibling.value)">send</button>
+<section class="chat-page">
+
+    <div id="member_manager" class="hidden">
+        <div class="member_columns">
+            <div>
+                <h4>Members</h4>
+                <ul id="members_list"
+                    class="member-drop-zone"
+                    ondragover="event.preventDefault()"
+                    ondrop="communicatie.drop_member(event, true)">
+                </ul>
+            </div>
+            <div>
+                <h4>Not members</h4>
+                <ul id="non_members_list"
+                    class="member-drop-zone"
+                    ondragover="event.preventDefault()"
+                    ondrop="communicatie.drop_member(event, false)">
+                </ul>
+            </div>
+        </div>
+        <button id="close_member_manager">Done</button>
+    </div>
+
+    <div id="messages" class="messages"></div>
+
+    <div id="input_area" class="input-area">
+        <div id="reply_context" class="hidden"></div>
+        <div id="image_preview" class="hidden"></div>
+        <div class="input-row">
+            <div id="drop_zone"
+                 class="drop-zone"
+                 ondragover="event.preventDefault()"
+                 ondrop="communicatie.drop_image(event)">
+                Drop image
+            </div>
+            <textarea id="message_input" placeholder="Message…" rows="1" maxlength="4096"></textarea>
+            <button id="send_btn">Send</button>
+        </div>
+    </div>
+
+</section>

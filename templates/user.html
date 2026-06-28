@@ -1,4 +1,18 @@
-<form method="post" enctype="multipart/form-data" action="javascript:communicatie.set_avatar()">
-    <label for="new_avatar">Avatar</label><img id="avatar" src="img/empty.webp"><input type="file" id="new_avatar" name="img" accept="image/*"><input id="submit_avatar" type="submit">
-</form>
-<label for="number_of_messages">Number of messages</label><input id="number_of_messages" type="number" disabled>
+<section class="user-page">
+
+    <div class="avatar-wrap">
+        <img id="user_avatar" src="" alt="avatar">
+        <form id="avatar_form">
+            <label for="avatar_input" class="btn">Change avatar</label>
+            <input type="file" id="avatar_input" accept="image/*" class="hidden">
+        </form>
+    </div>
+
+    <div class="user-info">
+        <h2 id="user_name_display"></h2>
+        <p id="user_joined"></p>
+    </div>
+
+    <button id="delete_account_btn" class="danger">Delete account</button>
+
+</section>
