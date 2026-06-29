@@ -3,35 +3,60 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Communicatie</title>
-    <link rel="stylesheet" href="/communicatie.css">
+    <title>Messages</title>
+    <link rel="stylesheet" href="{{ base_path }}/communicatie.css?v=49">
 </head>
 <body>
-    <header>
-        <span id="title">Communicatie</span>
-        <nav id="nav">
-            {% if logged_in %}
-            <a href="javascript:communicatie.show_page('/channels.html')">Channels</a>
-            <a href="javascript:communicatie.show_page('/user.html')">{{ user_name }}</a>
-            <a href="/logout">Logout</a>
-            {% else %}
-            <a href="javascript:communicatie.show_page('/login.html')">Login</a>
-            {% endif %}
-        </nav>
-    </header>
 
+{% if logged_in %}
+<div id="app">
+
+    <!-- Desktop sidebar nav -->
+    <nav id="sidenav">
+        <div class="nav-logo">C</div>
+        <a class="nav-item" data-page="stream"   title="Stream">🌊</a>
+        <a class="nav-item" data-page="channels" title="Channels">💬</a>
+        <a class="nav-item" data-page="peers"    title="Peers">🔗</a>
+        <a class="nav-item" data-page="users"    title="Users">👥</a>
+        <a class="nav-item" data-page="server"   title="Server">⚙️</a>
+        <div class="nav-spacer"></div>
+        <a class="nav-item" data-page="user"     title="Profile">
+            <img id="nav-avatar" src="" alt="👤">
+        </a>
+    </nav>
+
+    <!-- Main content -->
     <main id="main"></main>
 
-    <div id="error" class="hidden"></div>
+</div>
 
-    <script src="/communicatie.js"></script>
-    <script>
-        communicatie.init(
-            {{ 'true' if logged_in else 'false' }},
-            "{{ user_id }}",
-            "{{ user_name }}",
-            {{ 'true' if is_owner else 'false' }}
-        );
-    </script>
+<!-- Mobile bottom nav -->
+<nav id="bottom-nav">
+    <a class="nav-item" data-page="stream">🌊<span>Stream</span></a>
+    <a class="nav-item" data-page="channels">💬<span>Channels</span></a>
+    <a class="nav-item" data-page="peers">🔗<span>Peers</span></a>
+    <a class="nav-item" data-page="users">👥<span>Users</span></a>
+    <a class="nav-item" data-page="server">⚙️<span>Server</span></a>
+    <a class="nav-item" data-page="user">👤<span>Profile</span></a>
+</nav>
+
+{% else %}
+<div id="app" class="no-nav">
+    <main id="main"></main>
+</div>
+{% endif %}
+
+<div id="error" class="hidden"></div>
+
+<script>var _base_path = "{{ base_path }}";</script>
+<script src="{{ base_path }}/communicatie.js?v=49"></script>
+<script>
+    communicatie.init(
+        {{ 'true' if logged_in else 'false' }},
+        "{{ user_id }}",
+        "{{ user_name }}",
+        {{ 'true' if is_owner else 'false' }}
+    );
+</script>
 </body>
 </html>

@@ -11,6 +11,7 @@ from PIL import Image, ImageOps
 import auth
 import config
 import db
+import db_config
 
 log = logging.getLogger(__name__)
 
@@ -112,33 +113,37 @@ async def _save_upload(field, *, avatar: bool = False) -> str:
 # Page routes — serve Jinja2 templates
 # ---------------------------------------------------------------------------
 
+def _tpl_ctx(session, owner_id) -> dict:
+    return {
+        "logged_in":  session is not None,
+        "user_name":  session["name"] if session else "",
+        "user_id":    str(session["user_id"]) if session else "",
+        "is_owner":   session and str(session["user_id"]) == owner_id,
+        "base_path":  config.BASE_PATH,
+    }
+
+
 async def index(request: web.Request) -> web.Response:
-    session = await auth.session_from_request(request)
+    session  = await auth.session_from_request(request)
     owner_id = await db.setting_get("owner_id")
-    return aiohttp_jinja2.render_template(
-        "index.html", request,
-        {
-            "logged_in": session is not None,
-            "user_name": session["name"] if session else "",
-            "user_id":   str(session["user_id"]) if session else "",
-            "is_owner":  session and str(session["user_id"]) == owner_id,
-        }
-    )
+    return aiohttp_jinja2.render_template("index.html", request, _tpl_ctx(session, owner_id))
+
+
+_TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+
+def raw_file(filename: str, content_type: str):
+    path = _TEMPLATES_DIR / filename
+    body = path.read_bytes()
+    async def _handler(request: web.Request) -> web.Response:
+        return web.Response(body=body, content_type=content_type)
+    return _handler
 
 
 def page(template: str, content_type: str = "text/html"):
     async def _handler(request: web.Request) -> web.Response:
-        session = await auth.session_from_request(request)
+        session  = await auth.session_from_request(request)
         owner_id = await db.setting_get("owner_id")
-        response = aiohttp_jinja2.render_template(
-            template, request,
-            {
-                "logged_in": session is not None,
-                "user_name": session["name"] if session else "",
-                "user_id":   str(session["user_id"]) if session else "",
-                "is_owner":  session and str(session["user_id"]) == owner_id,
-            }
-        )
+        response = aiohttp_jinja2.render_template(template, request, _tpl_ctx(session, owner_id))
         response.content_type = content_type
         return response
     return _handler
@@ -283,6 +288,11 @@ async def proxy_img(request: web.Request) -> web.Response:
         raise web.HTTPBadGateway()
 
 
+async def succession(request: web.Request) -> web.Response:
+    """Public endpoint — no auth. Peers fetch this to resolve cert rotations."""
+    return web.json_response({"records": db_config.succession_all()})
+
+
 async def logout(request: web.Request) -> web.Response:
     token = request.cookies.get(config.SESSION_COOKIE)
     if token:
@@ -302,12 +312,20 @@ routes = [
     ("GET",  "/chat.html",     page("chat.html")),
     ("GET",  "/channels.html", page("channels.html")),
     ("GET",  "/user.html",     page("user.html")),
+    ("GET",  "/stream.html",   page("stream.html")),
+    ("GET",  "/peers.html",    page("peers.html")),
+    ("GET",  "/server.html",   page("server.html")),
+    ("GET",  "/users.html",    page("users.html")),
+    ("GET",  "/channels.html",  page("channels.html")),
     ("GET",  "/communicatie.css", page("communicatie.css", "text/css")),
     ("GET",  "/communicatie.js",  page("communicatie.js",  "application/javascript")),
+    ("GET",  "/emoji-picker.js",   raw_file("emoji-picker.js",   "application/javascript")),
+    ("GET",  "/emoji-data.json",   raw_file("emoji-data.json",   "application/json")),
     ("POST", "/register",      register),
     ("POST", "/login",         login),
     ("POST", "/set_avatar",    set_avatar),
     ("POST", "/upload",        upload_image),
     ("GET",  "/proxy_img",     proxy_img),
+    ("GET",  "/succession",    succession),
     ("GET",  "/logout",        logout),
 ]

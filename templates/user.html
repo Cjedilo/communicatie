@@ -1,18 +1,44 @@
-<section class="user-page">
+<div class="page-header">
+    <h2 id="profile_title">Profile</h2>
+</div>
 
+<section class="settings-section user-profile">
     <div class="avatar-wrap">
         <img id="user_avatar" src="" alt="avatar">
-        <form id="avatar_form">
-            <label for="avatar_input" class="btn">Change avatar</label>
-            <input type="file" id="avatar_input" accept="image/*" class="hidden">
-        </form>
+        <div>
+            <h3 id="user_name_display"></h3>
+            <p id="user_joined"></p>
+            <p id="user_peer" class="hint hidden"></p>
+            <form id="avatar_form" class="hidden">
+                <label for="avatar_input" class="btn">Change avatar</label>
+                <input type="file" id="avatar_input" accept="image/*" class="hidden">
+            </form>
+        </div>
     </div>
+</section>
 
-    <div class="user-info">
-        <h2 id="user_name_display"></h2>
-        <p id="user_joined"></p>
+<section class="settings-section hidden" id="own_actions">
+    <h3>Display name</h3>
+    <form id="display_name_form" class="inline-form">
+        <input type="text" id="display_name_input" placeholder="Your display name" maxlength="128">
+        <button type="submit">Save</button>
+    </form>
+    <p class="hint" id="login_name_hint"></p>
+    <div style="margin-top:1rem">
+        <button id="logout_btn">Log out</button>
+        <button id="delete_account_btn" class="danger">Delete account</button>
     </div>
+</section>
 
-    <button id="delete_account_btn" class="danger">Delete account</button>
+<section class="settings-section hidden" id="admin_actions">
+    <button id="admin_delete_btn" class="danger">Delete user</button>
+</section>
 
+<section class="settings-section hidden" id="block_actions">
+    <button id="profile_block_btn">Block</button>
+</section>
+
+<section class="settings-section hidden" id="user_messages_section">
+    <h3>Recent messages</h3>
+    <ul id="user_messages_list" class="user-msg-list"></ul>
 </section>

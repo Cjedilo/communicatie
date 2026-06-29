@@ -29,13 +29,21 @@ async def _redirect_to_https(request: web.Request) -> web.Response:
 
 
 async def _cleanup_sessions(app: web.Application):
-    """Background task: purge expired sessions every hour."""
+    """Background task: purge expired DB sessions hourly; clean idle peer WS every 10 min."""
+    from federation import cleanup_idle_sessions
+    tick = 0
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(600)
+        tick += 1
         try:
-            await db.sessions_purge_expired()
+            await cleanup_idle_sessions()
         except Exception as e:
-            log.warning("Session purge failed: %s", e)
+            log.warning("Idle peer session cleanup failed: %s", e)
+        if tick % 6 == 0:   # every hour
+            try:
+                await db.sessions_purge_expired()
+            except Exception as e:
+                log.warning("Session purge failed: %s", e)
 
 
 async def _start_cleanup(app: web.Application):
@@ -62,12 +70,20 @@ def build_app() -> web.Application:
     app.on_startup.append(_start_cleanup)
     app.on_cleanup.append(_stop_cleanup)
 
-    for route in http_routes:
-        app.router.add_route(route[0], route[1], route[2])
+    bp = config.BASE_PATH  # e.g. "/chat" or ""
 
-    app.router.add_get("/ws",   ws_handler)
-    app.router.add_get("/peer", peer_ws_handler)
-    app.router.add_static("/img", config.UPLOAD_DIR, show_index=False)
+    for route in http_routes:
+        app.router.add_route(route[0], bp + route[1], route[2])
+
+    app.router.add_get(bp + "/ws",   ws_handler)
+    app.router.add_get(bp + "/peer", peer_ws_handler)
+    app.router.add_static(bp + "/img", config.UPLOAD_DIR, show_index=False)
+
+    # Redirect bare base path (no trailing slash) to base path + /
+    if bp:
+        async def _redirect_base(request):
+            raise web.HTTPFound(bp + "/")
+        app.router.add_get(bp, _redirect_base)
 
     return app
 
@@ -93,19 +109,21 @@ def main():
     loop = asyncio.new_event_loop()
 
     https_runner = web.AppRunner(app)
-    http_runner  = web.AppRunner(redirect)
 
     async def start():
         await https_runner.setup()
-        await http_runner.setup()
-
         https_site = web.TCPSite(https_runner, config.HOST, config.PORT, ssl_context=ssl_ctx)
-        http_site  = web.TCPSite(http_runner,  config.HOST, config.PORT_HTTP)
-
         await https_site.start()
-        await http_site.start()
 
-        log.info("HTTPS on port %d, HTTP→HTTPS redirect on port %d", config.PORT, config.PORT_HTTP)
+        if config.PORT_HTTP:
+            redirect      = build_redirect_app()
+            http_runner   = web.AppRunner(redirect)
+            await http_runner.setup()
+            http_site = web.TCPSite(http_runner, config.HOST, config.PORT_HTTP)
+            await http_site.start()
+            log.info("HTTPS on port %d, HTTP→HTTPS redirect on port %d", config.PORT, config.PORT_HTTP)
+        else:
+            log.info("HTTPS on port %d (no HTTP redirect — running behind proxy)", config.PORT)
 
     loop.run_until_complete(start())
     try:
@@ -114,7 +132,6 @@ def main():
         pass
     finally:
         loop.run_until_complete(https_runner.cleanup())
-        loop.run_until_complete(http_runner.cleanup())
 
 
 if __name__ == "__main__":

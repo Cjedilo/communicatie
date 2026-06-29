@@ -22,16 +22,21 @@ CREATE TABLE IF NOT EXISTS peers (
     name            TEXT,
     address         TEXT    NOT NULL UNIQUE,    -- wss://host:port
     ssl_fingerprint TEXT,                       -- SHA-256 of their cert, pinned on first connect
+    status          TEXT    NOT NULL DEFAULT 'approved',  -- approved/pending/blocked
+    last_seen       TIMESTAMPTZ,
     created         TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE peers ADD COLUMN IF NOT EXISTS status    TEXT        NOT NULL DEFAULT 'approved';
+ALTER TABLE peers ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
 
 -- Channels are owned by this server
 CREATE TABLE IF NOT EXISTS channels (
-    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        TEXT        NOT NULL,
-    public      BOOLEAN     DEFAULT TRUE,
-    created_by  UUID        REFERENCES users(id) ON DELETE SET NULL,
-    created     TIMESTAMPTZ DEFAULT NOW()
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            TEXT        NOT NULL,
+    public          BOOLEAN     DEFAULT TRUE,
+    stream_excluded BOOLEAN     DEFAULT FALSE,
+    created_by      UUID        REFERENCES users(id) ON DELETE SET NULL,
+    created         TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Members of private channels.
@@ -69,7 +74,7 @@ CREATE TABLE IF NOT EXISTS message_content (
 -- Profile cache for users from federated servers
 CREATE TABLE IF NOT EXISTS user_cache (
     user_id     UUID    NOT NULL,
-    peer_id     UUID    REFERENCES peers(id) ON DELETE CASCADE,
+    peer_id     UUID    REFERENCES peers(id) ON DELETE SET NULL,
     name        TEXT,
     avatar      TEXT,
     updated     TIMESTAMPTZ DEFAULT NOW(),
@@ -81,4 +86,18 @@ CREATE TABLE IF NOT EXISTS user_cache (
 CREATE TABLE IF NOT EXISTS settings (
     key     TEXT PRIMARY KEY,
     value   TEXT
+);
+
+-- Per-user preferences (JSON blob, extensible without schema changes)
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    data    TEXT NOT NULL DEFAULT '{}'
+);
+
+-- Banned users per channel (for public channels)
+CREATE TABLE IF NOT EXISTS channel_bans (
+    channel_id  UUID    NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    user_id     UUID    NOT NULL,
+    peer_id     UUID    REFERENCES peers(id) ON DELETE CASCADE,
+    PRIMARY KEY (channel_id, user_id)
 );

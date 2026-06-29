@@ -1,0 +1,26 @@
+<div class="page-header">
+    <h2>Peers</h2>
+</div>
+
+<section class="settings-section">
+    <div id="peer_policy_section" class="hidden">
+        <label class="field-label">Connection policy</label>
+        <div class="radio-group" id="peer_policy_radios">
+            <label><input type="radio" name="peer_policy" value="open"> Open</label>
+            <label><input type="radio" name="peer_policy" value="approval"> Approval required</label>
+            <label><input type="radio" name="peer_policy" value="closed"> Closed</label>
+        </div>
+    </div>
+    <div class="peers-filter" style="margin-top:.6rem">
+        <input type="search" id="peer_filter_name" placeholder="Filter by name or address…" class="peers-filter-input">
+        <div id="peer_filter_status" class="peers-filter-chips"></div>
+    </div>
+    <ul id="peers_list" class="item-list" style="margin-top:.4rem"></ul>
+    <div id="peer_admin" class="hidden" style="margin-top:.6rem">
+        <label class="field-label">Connect a server</label>
+        <form id="add_peer_form" class="inline-form">
+            <input type="text" id="peer_address_input" placeholder="wss://other-server:443" maxlength="256">
+            <button type="submit">Connect</button>
+        </form>
+    </div>
+</section>

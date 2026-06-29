@@ -1,49 +1,22 @@
-<section class="channels-page">
+<div class="page-header">
+    <h2>Channels</h2>
+</div>
 
-    <div class="panel">
-        <h3>Channels</h3>
-        <ul id="channels_list" class="item-list"></ul>
-        <form id="create_channel_form">
-            <input type="text" id="channel_name" placeholder="New channel name" maxlength="128">
-            <label><input type="checkbox" id="channel_private"> Private</label>
-            <button type="submit">Create</button>
-        </form>
-    </div>
+<section class="settings-section">
+    <h3>Local channels</h3>
+    <input type="search" id="local_filter" class="filter-input" placeholder="Filter…">
+    <ul id="channels_list" class="item-list"></ul>
+    <form id="create_channel_form">
+        <input type="text" id="channel_name" placeholder="New channel name" maxlength="128">
+        <label class="checkbox-label">
+            <input type="checkbox" id="channel_private"> Private
+        </label>
+        <button type="submit">Create</button>
+    </form>
+</section>
 
-    <div class="panel">
-        <h3>Users</h3>
-        <ul id="users_list" class="item-list"></ul>
-    </div>
-
-    <div class="panel" id="peers_panel">
-        <h3>Peers</h3>
-        <ul id="peers_list" class="item-list"></ul>
-
-        <div id="peer_admin" class="hidden">
-            <label class="field-label">Connect a server</label>
-            <form id="add_peer_form" class="inline-form">
-                <input type="text" id="peer_address_input" placeholder="wss://other-server:443" maxlength="256">
-                <button type="submit">Connect</button>
-            </form>
-
-            <label class="field-label">This server's name</label>
-            <form id="peer_name_form" class="inline-form">
-                <input type="text" id="peer_name_input" placeholder="My server" maxlength="128">
-                <button type="submit">Save</button>
-            </form>
-        </div>
-
-        <label class="field-label">This server's address <span class="hint">(share this to connect)</span></label>
-        <div id="peer_address_display" class="address-display hidden">
-            <span id="peer_address_value"></span>
-            <button id="peer_address_copy" type="button">Copy</button>
-        </div>
-        <div id="peer_admin_address" class="hidden">
-            <form id="peer_address_form" class="inline-form">
-                <input type="text" id="peer_address_self_input" placeholder="wss://this-server:443" maxlength="256">
-                <button type="submit">Set</button>
-            </form>
-        </div>
-    </div>
-
+<section class="settings-section" id="remote_channels_section">
+    <h3>Remote channels</h3>
+    <input type="search" id="remote_filter" class="filter-input" placeholder="Filter…">
+    <ul id="remote_channels_list" class="item-list"></ul>
 </section>

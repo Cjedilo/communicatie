@@ -22,15 +22,18 @@ CREATE TABLE IF NOT EXISTS peers (
     name            TEXT,
     address         TEXT    NOT NULL UNIQUE,
     ssl_fingerprint TEXT,
+    status          TEXT    NOT NULL DEFAULT 'approved',
+    last_seen       TEXT,
     created         TEXT    DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS channels (
-    id          TEXT    PRIMARY KEY,
-    name        TEXT    NOT NULL,
-    public      INTEGER DEFAULT 1,
-    created_by  TEXT    REFERENCES users(id) ON DELETE SET NULL,
-    created     TEXT    DEFAULT (datetime('now'))
+    id              TEXT    PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    public          INTEGER DEFAULT 1,
+    stream_excluded INTEGER DEFAULT 0,
+    created_by      TEXT    REFERENCES users(id) ON DELETE SET NULL,
+    created         TEXT    DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS channel_members (
@@ -59,7 +62,7 @@ CREATE TABLE IF NOT EXISTS message_content (
 
 CREATE TABLE IF NOT EXISTS user_cache (
     user_id     TEXT    NOT NULL,
-    peer_id     TEXT    REFERENCES peers(id) ON DELETE CASCADE,
+    peer_id     TEXT    REFERENCES peers(id) ON DELETE SET NULL,
     name        TEXT,
     avatar      TEXT,
     updated     TEXT    DEFAULT (datetime('now')),
@@ -69,4 +72,18 @@ CREATE TABLE IF NOT EXISTS user_cache (
 CREATE TABLE IF NOT EXISTS settings (
     key     TEXT PRIMARY KEY,
     value   TEXT
+);
+
+-- Per-user preferences (JSON blob, extensible without schema changes)
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    data    TEXT NOT NULL DEFAULT '{}'
+);
+
+-- Banned users per channel (for public channels)
+CREATE TABLE IF NOT EXISTS channel_bans (
+    channel_id  TEXT    NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    user_id     TEXT    NOT NULL,
+    peer_id     TEXT    REFERENCES peers(id) ON DELETE CASCADE,
+    PRIMARY KEY (channel_id, user_id)
 );

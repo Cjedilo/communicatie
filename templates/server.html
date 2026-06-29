@@ -1,0 +1,109 @@
+<div class="page-header">
+    <h2>Server</h2>
+</div>
+
+<section class="settings-section">
+    <h3>Identity</h3>
+
+    <label class="field-label">
+        Name
+        <button type="button" class="info-btn" aria-label="About server name">i
+            <span class="info-popover">The display name of this server. Peers who connect to you will see this name in their peer list. Change it to something recognisable — it has no effect on connectivity.</span>
+        </button>
+    </label>
+    <form id="peer_name_form" class="inline-form">
+        <input type="text" id="peer_name_input" placeholder="My server" maxlength="128" readonly>
+        <button type="submit" id="peer_name_save_btn" class="hidden">Save</button>
+    </form>
+
+    <label class="field-label" style="margin-top:.6rem">
+        Address
+        <button type="button" class="info-btn" aria-label="About server address">i
+            <span class="info-popover">The WebSocket address peers use to reach this server (e.g. <em>wss://example.com:8443</em>). Share this with others so they can add you as a peer.<br><br><strong>Warning:</strong> changing this address breaks all existing peer connections — every peer that has added you will need to re-add you at the new address.</span>
+        </button>
+    </label>
+    <div class="inline-form">
+        <input type="text" id="peer_address_field" readonly placeholder="wss://this-server:443" maxlength="256">
+        <button type="button" id="peer_address_copy_btn">Copy</button>
+        <button type="button" id="peer_address_edit_btn" class="hidden">Edit</button>
+        <button type="button" id="peer_address_save_btn" class="hidden">Save</button>
+        <button type="button" id="peer_address_cancel_btn" class="hidden secondary">Cancel</button>
+    </div>
+</section>
+
+<section class="settings-section hidden" id="upload_section">
+    <h3>
+        Image storage
+        <button type="button" class="info-btn" aria-label="About image storage">i
+            <span class="info-popover">Images sent in channels are stored in this directory on the server's filesystem. The directory must be writable by the server process.<br><br>You can move existing images to a new location when changing the path — use <em>Copy</em> to keep the originals, or <em>Move</em> to free up space at the old location.</span>
+        </button>
+    </h3>
+    <label class="field-label">Upload directory</label>
+    <div class="inline-form">
+        <input type="text" id="upload_dir_field" readonly maxlength="512">
+        <button type="button" id="upload_dir_edit_btn" class="hidden">Edit</button>
+        <button type="button" id="upload_dir_save_btn" class="hidden">Save</button>
+        <button type="button" id="upload_dir_cancel_btn" class="hidden secondary">Cancel</button>
+        <span id="upload_dir_restart_note" class="hint hidden"> — restart to apply</span>
+    </div>
+    <div id="upload_migrate_options" class="hidden" style="margin-top:.4rem">
+        <div class="radio-group">
+            <label><input type="radio" name="upload_migrate" value="none" checked> Keep files in place</label>
+            <label><input type="radio" name="upload_migrate" value="copy"> Copy to new location</label>
+            <label><input type="radio" name="upload_migrate" value="move"> Move to new location</label>
+        </div>
+    </div>
+    <span id="upload_dir_disk_info" class="hint"></span>
+</section>
+
+<section class="settings-section hidden" id="db_section">
+    <h3>
+        Database
+        <button type="button" class="info-btn" aria-label="About database">i
+            <span class="info-popover"><strong>SQLite</strong> stores everything in a single file — simple to set up and fine for small deployments.<br><br><strong>PostgreSQL</strong> is better for larger installations with many users or high message volume. It requires a running PostgreSQL server and a connection string.<br><br>A restart is required after changing the database. The existing data is <em>not</em> migrated automatically — back up first.</span>
+        </button>
+    </h3>
+    <div class="radio-group">
+        <label><input type="radio" name="db_type" value="sqlite"> SQLite</label>
+        <label><input type="radio" name="db_type" value="postgres"> PostgreSQL</label>
+    </div>
+    <form id="db_form">
+        <div id="db_sqlite_fields">
+            <label class="field-label">Path</label>
+            <input type="text" id="db_sqlite_path" placeholder="/path/to/db.sqlite" maxlength="512">
+        </div>
+        <div id="db_pg_fields" class="hidden">
+            <label class="field-label">Connection string</label>
+            <input type="text" id="db_pg_dsn" placeholder="postgresql://user:pass@host/db" maxlength="512">
+        </div>
+        <div class="inline-form" style="margin-top:.5rem">
+            <button type="submit">Save</button>
+            <span id="db_restart_note" class="hint hidden"> — restart the server to apply</span>
+        </div>
+    </form>
+</section>
+
+<section class="settings-section hidden" id="cert_section">
+    <h3>
+        SSL certificate
+        <button type="button" class="info-btn" aria-label="About SSL certificate">i
+            <span class="info-popover">This server uses SSL/TLS for all connections. The certificate fingerprint is shared with peers on first connect and pinned (TOFU — Trust On First Use).<br><br><strong>Self-signed:</strong> generated automatically, renewed here with <em>Renew</em>. Each renewal creates a new fingerprint — peers are notified automatically via a signed succession record so they stay connected.<br><br><strong>Own certificate:</strong> provide paths to your .pem files (e.g. from Let's Encrypt). The server reloads the cert without a restart. Changing to a completely new cert will break connections with peers that have pinned the old fingerprint.</span>
+        </button>
+    </h3>
+    <div class="cert-info-row">
+        <div id="cert_info_display"></div>
+        <button id="cert_renew_btn" type="button" class="btn-inline hidden">Renew</button>
+        <button id="cert_reload_btn" type="button" class="btn-inline hidden">Reload</button>
+    </div>
+    <p id="cert_external_note" class="hint hidden">External renewal assumed — use Reload after certbot or another tool has updated the files on disk.</p>
+    <form id="cert_form" style="margin-top:.6rem">
+        <label class="field-label">Certificate (.pem)</label>
+        <input type="text" id="cert_path_input" maxlength="512">
+        <label class="field-label" style="margin-top:.5rem">Private key (.pem)</label>
+        <input type="text" id="cert_key_input" maxlength="512">
+        <div class="inline-form" style="margin-top:.6rem">
+            <button type="submit">Save</button>
+            <span id="cert_restart_note" class="hint hidden"> — restart the server to apply</span>
+        </div>
+    </form>
+</section>

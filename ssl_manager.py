@@ -180,6 +180,15 @@ def _letsencrypt(domain: str, email: str, cert_path: Path, key_path: Path, stagi
 # Public API
 # ---------------------------------------------------------------------------
 
+_active_ctx: ssl.SSLContext | None = None
+
+
+def reload_cert_chain(cert_path: str, key_path: str):
+    """Hot-reload the cert into the running SSL context — no restart needed."""
+    if _active_ctx:
+        _active_ctx.load_cert_chain(cert_path, key_path)
+
+
 def ensure_ssl(cert_path_str: str, key_path_str: str, hostname: str = "localhost") -> ssl.SSLContext:
     """
     Returns a server SSLContext.  Generates a self-signed cert if none exists.
@@ -194,6 +203,8 @@ def ensure_ssl(cert_path_str: str, key_path_str: str, hostname: str = "localhost
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert_path, key_path)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    global _active_ctx
+    _active_ctx = ctx
     return ctx
 
 
@@ -212,6 +223,134 @@ def peer_ssl_context(fingerprint: str | None = None) -> ssl.SSLContext:
 def cert_fingerprint(cert_der: bytes) -> str:
     import hashlib
     return hashlib.sha256(cert_der).hexdigest()
+
+
+def sign_succession(old_key_path: str, old_cert_path: str, new_cert_path: str) -> dict | None:
+    """
+    Sign a succession record: the old private key vouches for the new cert.
+    Returns the record dict ready for storage, or None if fingerprints are identical
+    or if signing fails.
+    """
+    import base64, json as _json
+    from cryptography import x509 as cx
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding as _pad
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    from datetime import datetime, timezone
+
+    try:
+        old_cert_der = cx.load_pem_x509_certificate(
+            Path(old_cert_path).read_bytes()
+        ).public_bytes(serialization.Encoding.DER)
+        new_cert_der = cx.load_pem_x509_certificate(
+            Path(new_cert_path).read_bytes()
+        ).public_bytes(serialization.Encoding.DER)
+    except Exception as e:
+        log.warning("sign_succession: cannot load certs: %s", e)
+        return None
+
+    old_fp = cert_fingerprint(old_cert_der)
+    new_fp = cert_fingerprint(new_cert_der)
+    if old_fp == new_fp:
+        return None
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    payload = _json.dumps(
+        {"old_fp": old_fp, "new_fp": new_fp, "timestamp": timestamp}, sort_keys=True
+    ).encode()
+
+    try:
+        private_key = load_pem_private_key(Path(old_key_path).read_bytes(), password=None)
+        signature   = private_key.sign(payload, _pad.PKCS1v15(), hashes.SHA256())
+    except Exception as e:
+        log.warning("sign_succession: cannot sign: %s", e)
+        return None
+
+    return {
+        "old_fingerprint":  old_fp,
+        "old_cert_der_b64": base64.b64encode(old_cert_der).decode(),
+        "new_fingerprint":  new_fp,
+        "new_cert_der_b64": base64.b64encode(new_cert_der).decode(),
+        "timestamp":        timestamp,
+        "signature":        base64.b64encode(signature).decode(),
+    }
+
+
+def sign_succession_bytes(old_key_pem: bytes, old_cert_der: bytes, new_cert_der: bytes) -> dict | None:
+    """
+    Like sign_succession but takes raw bytes — use when the old key/cert are
+    already in memory (e.g. read before overwriting during renewal).
+    """
+    import base64, json as _json
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding as _pad
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    from datetime import datetime, timezone
+
+    old_fp = cert_fingerprint(old_cert_der)
+    new_fp = cert_fingerprint(new_cert_der)
+    if old_fp == new_fp:
+        return None
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    payload = _json.dumps(
+        {"old_fp": old_fp, "new_fp": new_fp, "timestamp": timestamp}, sort_keys=True
+    ).encode()
+
+    try:
+        private_key = load_pem_private_key(old_key_pem, password=None)
+        signature   = private_key.sign(payload, _pad.PKCS1v15(), hashes.SHA256())
+    except Exception as e:
+        log.warning("sign_succession_bytes: cannot sign: %s", e)
+        return None
+
+    from cryptography import x509 as cx
+    new_cert_der_canon = cx.load_der_x509_certificate(new_cert_der).public_bytes(serialization.Encoding.DER)
+
+    return {
+        "old_fingerprint":  old_fp,
+        "old_cert_der_b64": base64.b64encode(old_cert_der).decode(),
+        "new_fingerprint":  new_fp,
+        "new_cert_der_b64": base64.b64encode(new_cert_der_canon).decode(),
+        "timestamp":        timestamp,
+        "signature":        base64.b64encode(signature).decode(),
+    }
+
+
+def verify_succession_step(record: dict) -> bool:
+    """
+    Verify one link in a succession chain. Returns True only if:
+    - old_cert_der hashes to old_fingerprint
+    - new_cert_der hashes to new_fingerprint
+    - signature over {old_fp, new_fp, timestamp} is valid under old_cert's public key
+    """
+    import base64, json as _json
+    from cryptography import x509 as cx
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding as _pad
+
+    try:
+        old_cert_der = base64.b64decode(record["old_cert_der_b64"])
+        new_cert_der = base64.b64decode(record["new_cert_der_b64"])
+
+        if cert_fingerprint(old_cert_der) != record["old_fingerprint"]:
+            return False
+        if cert_fingerprint(new_cert_der) != record["new_fingerprint"]:
+            return False
+
+        public_key = cx.load_der_x509_certificate(old_cert_der).public_key()
+        payload = _json.dumps(
+            {"old_fp": record["old_fingerprint"],
+             "new_fp": record["new_fingerprint"],
+             "timestamp": record["timestamp"]},
+            sort_keys=True,
+        ).encode()
+        public_key.verify(
+            base64.b64decode(record["signature"]), payload, _pad.PKCS1v15(), hashes.SHA256()
+        )
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------

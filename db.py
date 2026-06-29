@@ -6,6 +6,7 @@ Set DB_DSN to:
   sqlite:///path/to/file.db            → SQLite
 """
 
+import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -75,6 +76,12 @@ class _PGBackend:
             await c.execute(
                 "ALTER TABLE message_content DROP CONSTRAINT IF EXISTS message_content_id_fkey"
             )
+            await c.execute(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT"
+            )
+            await c.execute(
+                "ALTER TABLE channels ADD COLUMN IF NOT EXISTS icon TEXT"
+            )
 
     async def close(self):
         if self._pool:
@@ -120,6 +127,19 @@ class _SQLiteBackend:
         await self._conn.execute(
             "ALTER TABLE message_content_new RENAME TO message_content"
         )
+        # Migrate: add new columns if missing
+        for col_sql in [
+            "ALTER TABLE peers ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'",
+            "ALTER TABLE peers ADD COLUMN last_seen TEXT",
+            "ALTER TABLE users ADD COLUMN display_name TEXT",
+            "ALTER TABLE channels ADD COLUMN icon TEXT",
+        ]:
+            try:
+                await self._conn.execute(col_sql)
+                await self._conn.commit()
+            except Exception:
+                pass  # column already exists
+
         await self._conn.commit()
 
     async def close(self):
@@ -162,6 +182,50 @@ async def init(app=None):
         _db      = _PGBackend(dsn)
         _is_sqlite = False
     await _db.init()
+    # One-time migration: set stream_excluded=True for existing public channels.
+    # Guarded by a settings flag so user overrides are never reset on restart.
+    # One-time cleanup: remove cached remote message content (fetch-on-demand now)
+    if not await _db.fetchrow("SELECT value FROM settings WHERE key=$1", "purged_remote_content"):
+        await purge_remote_message_content()
+        await _db.execute(
+            "INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO NOTHING",
+            "purged_remote_content", "1",
+        )
+
+    if not await _db.fetchrow("SELECT value FROM settings WHERE key=$1", "migrated_stream_excluded"):
+        t = 1 if _is_sqlite else True
+        f = 0 if _is_sqlite else False
+        await _db.execute(
+            "UPDATE channels SET stream_excluded=$1 WHERE public=$2 AND (stream_excluded=$3 OR stream_excluded IS NULL)",
+            t, t, f,
+        )
+        await _db.execute(
+            "INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO NOTHING",
+            "migrated_stream_excluded", "1",
+        )
+
+
+async def purge_remote_message_content():
+    """Delete cached message_content for messages not sent by local users.
+    Keeps only content where this server is the origin (sender_peer_id IS NULL).
+    """
+    await _db.execute(
+        """
+        DELETE FROM message_content
+        WHERE id IN (
+            SELECT mc.id FROM message_content mc
+            JOIN message_index mi ON mi.id = mc.id
+            WHERE mi.sender_peer_id IS NOT NULL
+        )
+        """
+    )
+    # Also remove orphaned content with no message_index at all
+    await _db.execute(
+        """
+        DELETE FROM message_content
+        WHERE id NOT IN (SELECT id FROM message_index)
+        """
+    )
 
 
 async def close(app=None):
@@ -183,6 +247,32 @@ def _now() -> datetime:
 
 # ---------------------------------------------------------------------------
 # Settings
+# ---------------------------------------------------------------------------
+# User settings (per-user JSON blob)
+# ---------------------------------------------------------------------------
+
+async def user_settings_get(user_id: uuid.UUID) -> dict:
+    row = await _db.fetchrow("SELECT data FROM user_settings WHERE user_id=$1", user_id)
+    if not row or not row.get("data"):
+        return {}
+    data = row["data"]
+    try:
+        return json.loads(data) if isinstance(data, str) else dict(data)
+    except Exception:
+        return {}
+
+
+async def user_setting_set(user_id: uuid.UUID, key: str, value) -> None:
+    settings = await user_settings_get(user_id)
+    settings[key] = value
+    data_str = json.dumps(settings)
+    await _db.execute(
+        "INSERT INTO user_settings(user_id, data) VALUES($1,$2) "
+        "ON CONFLICT(user_id) DO UPDATE SET data=$2",
+        user_id, data_str,
+    )
+
+
 # ---------------------------------------------------------------------------
 
 async def setting_get(key: str) -> str | None:
@@ -241,7 +331,7 @@ async def user_delete(uid: uuid.UUID):
 
 async def users_all() -> list[dict]:
     return await _db.fetch(
-        "SELECT id, name, avatar, created FROM users ORDER BY name"
+        "SELECT id, COALESCE(display_name, name) AS name, avatar, created FROM users ORDER BY name"
     )
 
 
@@ -251,12 +341,20 @@ async def users_by_ids(ids: list[uuid.UUID]) -> list[dict]:
     if _is_sqlite:
         placeholders = ",".join(f"${i+1}" for i in range(len(ids)))
         return await _db.fetch(
-            f"SELECT id, name, avatar, created FROM users WHERE id IN ({placeholders})",
+            f"SELECT id, COALESCE(display_name, name) AS name, avatar, created FROM users WHERE id IN ({placeholders})",
             *ids,
         )
     return await _db.fetch(
-        "SELECT id, name, avatar, created FROM users WHERE id = ANY($1::uuid[])", ids
+        "SELECT id, COALESCE(display_name, name) AS name, avatar, created FROM users WHERE id = ANY($1::uuid[])", ids
     )
+
+
+async def channel_set_icon(channel_id: uuid.UUID, icon: str | None):
+    await _db.execute("UPDATE channels SET icon=$2 WHERE id=$1", channel_id, icon or None)
+
+
+async def user_set_display_name(uid: uuid.UUID, display_name: str | None):
+    await _db.execute("UPDATE users SET display_name=$2 WHERE id=$1", uid, display_name or None)
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +370,7 @@ async def session_create(token: str, user_id: uuid.UUID, expires_at: datetime):
 
 async def session_get(token: str) -> dict | None:
     return await _db.fetchrow(
-        "SELECT s.*, u.name, u.avatar FROM sessions s "
+        "SELECT s.*, COALESCE(u.display_name, u.name) AS name, u.avatar FROM sessions s "
         "JOIN users u ON u.id = s.user_id "
         "WHERE s.token=$1 AND s.expires_at > $2",
         token, _now(),
@@ -292,17 +390,18 @@ async def sessions_purge_expired():
 # ---------------------------------------------------------------------------
 
 async def channel_create(name: str, public: bool, created_by: uuid.UUID) -> dict:
-    cid = _new_id()
-    pub = 1 if (_is_sqlite and public) else public
+    cid  = _new_id()
+    pub  = 1 if (_is_sqlite and public) else public
+    excl = 1 if (_is_sqlite and public) else public  # public → excluded from stream by default
     if _is_sqlite:
         await _db.execute(
-            "INSERT INTO channels(id,name,public,created_by) VALUES($1,$2,$3,$4)",
-            cid, name, pub, created_by,
+            "INSERT INTO channels(id,name,public,created_by,stream_excluded) VALUES($1,$2,$3,$4,$5)",
+            cid, name, pub, created_by, excl,
         )
         return await _db.fetchrow("SELECT * FROM channels WHERE id=$1", cid)
     return await _db.fetchrow(
-        "INSERT INTO channels(id,name,public,created_by) VALUES($1,$2,$3,$4) RETURNING *",
-        cid, name, public, created_by,
+        "INSERT INTO channels(id,name,public,created_by,stream_excluded) VALUES($1,$2,$3,$4,$5) RETURNING *",
+        cid, name, public, created_by, public,
     )
 
 
@@ -314,12 +413,138 @@ async def channel_delete(cid: uuid.UUID):
     await _db.execute("DELETE FROM channels WHERE id=$1", cid)
 
 
+async def stream_messages(user_id: uuid.UUID, limit: int = 60, before=None) -> list[dict]:
+    """Recent messages across all visible, non-excluded local channels."""
+    before_clause = "AND mi.created < $5" if before is not None else ""
+    extra_args    = (before,) if before is not None else ()
+    return await _db.fetch(
+        f"""
+        SELECT mi.*, mc.text, mc.image,
+               COALESCE(COALESCE(u.display_name, u.name), uc.name,
+                   (SELECT name FROM user_cache
+                    WHERE user_id = mi.sender_user_id LIMIT 1))  AS sender_name,
+               COALESCE(u.avatar, uc.avatar,
+                   (SELECT avatar FROM user_cache
+                    WHERE user_id = mi.sender_user_id LIMIT 1)) AS sender_avatar,
+               c.name            AS channel_name,
+               c.icon            AS channel_icon,
+               c.public          AS channel_public,
+               c.stream_excluded AS stream_excluded,
+               p.address         AS peer_address,
+               p.name            AS peer_name
+        FROM message_index mi
+        JOIN channels c ON c.id = mi.channel_id
+        LEFT JOIN channel_members cm
+            ON cm.channel_id = c.id AND cm.user_id = $1
+        LEFT JOIN message_content mc ON mc.id = mi.id
+        LEFT JOIN users u
+            ON u.id = mi.sender_user_id AND mi.sender_peer_id IS NULL
+        LEFT JOIN user_cache uc
+            ON uc.user_id = mi.sender_user_id AND uc.peer_id = mi.sender_peer_id
+        LEFT JOIN peers p ON p.id = mi.sender_peer_id
+        WHERE (c.public = $2 OR cm.user_id IS NOT NULL)
+          AND (c.stream_excluded = $3 OR c.stream_excluded IS NULL)
+          {before_clause}
+        ORDER BY mi.created DESC
+        LIMIT $4
+        """,
+        user_id,
+        1 if _is_sqlite else True,
+        0 if _is_sqlite else False,
+        limit,
+        *extra_args,
+    )
+
+
+async def channel_last_message_summary(channel_id: uuid.UUID) -> dict | None:
+    """Returns last_activity timestamp and last_sender_name for a channel."""
+    return await _db.fetchrow(
+        """
+        SELECT mi.created AS last_activity,
+               COALESCE(COALESCE(u.display_name, u.name), uc.name) AS last_sender_name
+        FROM message_index mi
+        LEFT JOIN users u
+            ON u.id = mi.sender_user_id AND mi.sender_peer_id IS NULL
+        LEFT JOIN user_cache uc
+            ON uc.user_id = mi.sender_user_id AND uc.peer_id = mi.sender_peer_id
+        WHERE mi.channel_id = $1
+        ORDER BY mi.created DESC LIMIT 1
+        """,
+        channel_id,
+    )
+
+
+async def channel_set_stream_excluded(channel_id: uuid.UUID, excluded: bool):
+    val = 1 if (_is_sqlite and excluded) else excluded
+    await _db.execute(
+        "UPDATE channels SET stream_excluded=$2 WHERE id=$1",
+        channel_id, val,
+    )
+
+
+async def channels_stream(user_id: uuid.UUID) -> list[dict]:
+    """Channels visible to user with last-message preview, sorted by last activity."""
+    return await _db.fetch(
+        """
+        SELECT DISTINCT c.*,
+            last_mi.created          AS last_activity,
+            last_mi.sender_peer_id   AS last_peer_id,
+            COALESCE(COALESCE(u.display_name, u.name), uc.name) AS last_sender_name,
+            mc.text                  AS last_text,
+            mc.image                 AS last_image,
+            p.name                   AS last_peer_name
+        FROM channels c
+        LEFT JOIN channel_members cm
+            ON cm.channel_id = c.id AND cm.user_id = $1
+        LEFT JOIN message_index last_mi
+            ON last_mi.id = (
+                SELECT id FROM message_index mi2
+                WHERE mi2.channel_id = c.id
+                ORDER BY mi2.created DESC LIMIT 1
+            )
+        LEFT JOIN message_content mc ON mc.id = last_mi.id
+        LEFT JOIN users u
+            ON u.id = last_mi.sender_user_id AND last_mi.sender_peer_id IS NULL
+        LEFT JOIN user_cache uc
+            ON uc.user_id = last_mi.sender_user_id AND uc.peer_id = last_mi.sender_peer_id
+        LEFT JOIN peers p ON p.id = last_mi.sender_peer_id
+        WHERE c.public = $2 OR cm.user_id IS NOT NULL
+        ORDER BY last_activity DESC NULLS LAST, c.name
+        """,
+        user_id, 1 if _is_sqlite else True,
+    )
+
+
+async def channel_direct_find(user_id_a: uuid.UUID, user_id_b: uuid.UUID,
+                              peer_id_b: uuid.UUID | None = None) -> dict | None:
+    """Find a private channel whose only members are exactly these two users."""
+    is_self  = str(user_id_a) == str(user_id_b) and peer_id_b is None
+    expected = 1 if is_self else 2
+    pub      = 0 if _is_sqlite else False
+    row = await _db.fetchrow(
+        """
+        SELECT c.id FROM channels c
+        JOIN channel_members cm1
+             ON cm1.channel_id = c.id AND cm1.user_id = $1 AND cm1.peer_id IS NULL
+        JOIN channel_members cm2
+             ON cm2.channel_id = c.id AND cm2.user_id = $2
+             AND (cm2.peer_id = $3 OR ($3 IS NULL AND cm2.peer_id IS NULL))
+        WHERE c.public = $4
+          AND (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) = $5
+        LIMIT 1
+        """,
+        user_id_a, user_id_b, peer_id_b, pub, expected,
+    )
+    return await channel_by_id(row["id"]) if row else None
+
+
 async def channels_visible_to(user_id: uuid.UUID) -> list[dict]:
     return await _db.fetch(
         """
-        SELECT DISTINCT c.*
+        SELECT DISTINCT c.*, u.name AS created_by_name
         FROM channels c
         LEFT JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = $1
+        LEFT JOIN users u ON u.id = c.created_by
         WHERE c.public = $2 OR cm.user_id IS NOT NULL
         ORDER BY c.name
         """,
@@ -348,6 +573,21 @@ async def channels_visible_to_peer(peer_id: uuid.UUID) -> list[dict]:
     )
 
 
+async def channels_visible_to_remote_user(user_id: uuid.UUID, peer_id: uuid.UUID) -> list[dict]:
+    """Public channels + private channels where THIS specific remote user is a member."""
+    return await _db.fetch(
+        """
+        SELECT DISTINCT c.*
+        FROM channels c
+        LEFT JOIN channel_members cm
+            ON cm.channel_id = c.id AND cm.user_id = $1 AND cm.peer_id = $2
+        WHERE c.public = $3 OR cm.user_id IS NOT NULL
+        ORDER BY c.name
+        """,
+        user_id, peer_id, 1 if _is_sqlite else True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Channel members
 # ---------------------------------------------------------------------------
@@ -371,7 +611,7 @@ async def members_of(channel_id: uuid.UUID) -> list[dict]:
     return await _db.fetch(
         """
         SELECT cm.*,
-               COALESCE(u.name,   uc.name)   AS name,
+               COALESCE(COALESCE(u.display_name, u.name), uc.name) AS name,
                COALESCE(u.avatar, uc.avatar) AS avatar,
                p.name    AS peer_name,
                p.address AS peer_address
@@ -388,6 +628,73 @@ async def members_of(channel_id: uuid.UUID) -> list[dict]:
 async def is_member(channel_id: uuid.UUID, user_id: uuid.UUID) -> bool:
     r = await _db.fetchrow(
         "SELECT 1 FROM channel_members WHERE channel_id=$1 AND user_id=$2",
+        channel_id, user_id,
+    )
+    return r is not None
+
+
+# ---------------------------------------------------------------------------
+# Channel bans (public channels)
+# ---------------------------------------------------------------------------
+
+async def channel_participants(channel_id: uuid.UUID) -> list[dict]:
+    """Unique senders who have posted at least one message in this channel."""
+    rows = await _db.fetch(
+        """
+        SELECT DISTINCT mi.sender_user_id AS user_id, mi.sender_peer_id AS peer_id,
+               COALESCE(COALESCE(u.display_name, u.name), uc.name) AS name,
+               COALESCE(u.avatar,  uc.avatar) AS avatar,
+               p.name AS peer_name
+        FROM message_index mi
+        LEFT JOIN users      u  ON u.id       = mi.sender_user_id AND mi.sender_peer_id IS NULL
+        LEFT JOIN user_cache uc ON uc.user_id = mi.sender_user_id AND uc.peer_id = mi.sender_peer_id
+        LEFT JOIN peers      p  ON p.id       = mi.sender_peer_id
+        WHERE mi.channel_id = $1
+        """,
+        channel_id,
+    )
+    for r in rows:
+        r["id"] = r["user_id"]
+    return rows
+
+
+async def channel_ban_add(channel_id: uuid.UUID, user_id: uuid.UUID, peer_id: uuid.UUID | None = None):
+    await _db.execute(
+        "INSERT INTO channel_bans(channel_id,user_id,peer_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+        channel_id, user_id, peer_id,
+    )
+
+
+async def channel_ban_remove(channel_id: uuid.UUID, user_id: uuid.UUID):
+    await _db.execute(
+        "DELETE FROM channel_bans WHERE channel_id=$1 AND user_id=$2",
+        channel_id, user_id,
+    )
+
+
+async def channel_bans_for(channel_id: uuid.UUID) -> list[dict]:
+    rows = await _db.fetch(
+        """
+        SELECT cb.user_id, cb.peer_id,
+               COALESCE(COALESCE(u.display_name, u.name), uc.name) AS name,
+               COALESCE(u.avatar, uc.avatar) AS avatar,
+               p.name AS peer_name
+        FROM channel_bans cb
+        LEFT JOIN users      u  ON u.id       = cb.user_id AND cb.peer_id IS NULL
+        LEFT JOIN user_cache uc ON uc.user_id = cb.user_id AND uc.peer_id = cb.peer_id
+        LEFT JOIN peers      p  ON p.id       = cb.peer_id
+        WHERE cb.channel_id = $1
+        """,
+        channel_id,
+    )
+    for r in rows:
+        r["id"] = r["user_id"]
+    return rows
+
+
+async def is_banned(channel_id: uuid.UUID, user_id: uuid.UUID, peer_id: uuid.UUID | None = None) -> bool:
+    r = await _db.fetchrow(
+        "SELECT 1 FROM channel_bans WHERE channel_id=$1 AND user_id=$2",
         channel_id, user_id,
     )
     return r is not None
@@ -431,23 +738,87 @@ async def message_index_add(
     )
 
 
-async def messages_for_channel(channel_id: uuid.UUID, limit: int = 100) -> list[dict]:
+async def messages_by_user_for_peer(
+    sender_user_id: uuid.UUID,
+    requesting_peer_id: uuid.UUID | None,
+    limit: int = 10,
+) -> list[dict]:
+    """Recent messages by a local user, filtered to what a peer server may see."""
+    pub = 1 if _is_sqlite else True
     return await _db.fetch(
         """
+        SELECT mi.id, mi.channel_id, mi.created,
+               mc.text, mc.image,
+               c.name AS channel_name, c.public AS channel_public
+        FROM message_index mi
+        JOIN channels c ON c.id = mi.channel_id
+        LEFT JOIN channel_members cm
+            ON cm.channel_id = c.id AND cm.peer_id = $2
+        LEFT JOIN message_content mc ON mc.id = mi.id
+        WHERE mi.sender_user_id = $1
+          AND mi.sender_peer_id IS NULL
+          AND (c.public = $3 OR cm.peer_id IS NOT NULL)
+        ORDER BY mi.created DESC
+        LIMIT $4
+        """,
+        sender_user_id, requesting_peer_id, pub, limit,
+    )
+
+
+async def messages_by_user(
+    sender_user_id: uuid.UUID,
+    viewer_user_id: uuid.UUID,
+    sender_peer_id: uuid.UUID | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Recent messages by a user, only from channels the viewer can access."""
+    pub = 1 if _is_sqlite else True
+    return await _db.fetch(
+        """
+        SELECT mi.id, mi.channel_id, mi.created,
+               mc.text, mc.image,
+               c.name AS channel_name, c.public AS channel_public
+        FROM message_index mi
+        JOIN channels c ON c.id = mi.channel_id
+        LEFT JOIN channel_members cm
+            ON cm.channel_id = c.id AND cm.user_id = $2
+        LEFT JOIN message_content mc ON mc.id = mi.id
+        WHERE mi.sender_user_id = $1
+          AND (mi.sender_peer_id = $3 OR ($3 IS NULL AND mi.sender_peer_id IS NULL))
+          AND (c.public = $4 OR cm.user_id IS NOT NULL)
+        ORDER BY mi.created DESC
+        LIMIT $5
+        """,
+        sender_user_id, viewer_user_id, sender_peer_id, pub, limit,
+    )
+
+
+async def messages_for_channel(channel_id: uuid.UUID, limit: int = 100, before=None) -> list[dict]:
+    before_clause = "AND mi.created < $3" if before is not None else ""
+    extra_args    = (before,) if before is not None else ()
+    # With `before`: DESC so we get the *newest* messages before the cursor (stream pagination).
+    # Without `before`: ASC for the normal chat view.
+    order = "DESC" if before is not None else "ASC"
+    return await _db.fetch(
+        f"""
         SELECT mi.*, mc.text, mc.image,
-               COALESCE(u.name,   uc.name)   AS sender_name,
-               COALESCE(u.avatar, uc.avatar) AS sender_avatar,
+               COALESCE(COALESCE(u.display_name, u.name), uc.name,
+                   (SELECT name FROM user_cache
+                    WHERE user_id = mi.sender_user_id LIMIT 1))   AS sender_name,
+               COALESCE(u.avatar, uc.avatar,
+                   (SELECT avatar FROM user_cache
+                    WHERE user_id = mi.sender_user_id LIMIT 1)) AS sender_avatar,
                p.address AS peer_address, p.name AS peer_name
         FROM message_index mi
         LEFT JOIN message_content mc ON mc.id = mi.id
         LEFT JOIN users      u  ON u.id  = mi.sender_user_id AND mi.sender_peer_id IS NULL
         LEFT JOIN user_cache uc ON uc.user_id = mi.sender_user_id AND uc.peer_id = mi.sender_peer_id
         LEFT JOIN peers      p  ON p.id  = mi.sender_peer_id
-        WHERE mi.channel_id = $1
-        ORDER BY mi.created ASC
+        WHERE mi.channel_id = $1 {before_clause}
+        ORDER BY mi.created {order}
         LIMIT $2
         """,
-        channel_id, limit,
+        channel_id, limit, *extra_args,
     )
 
 
@@ -455,7 +826,7 @@ async def message_by_id(msg_id: uuid.UUID) -> dict | None:
     return await _db.fetchrow(
         """
         SELECT mi.*, mc.text, mc.image,
-               u.name AS sender_name, u.avatar AS sender_avatar
+               COALESCE(u.display_name, u.name) AS sender_name, u.avatar AS sender_avatar
         FROM message_index mi
         LEFT JOIN message_content mc ON mc.id = mi.id
         LEFT JOIN users u ON u.id = mi.sender_user_id AND mi.sender_peer_id IS NULL
@@ -468,6 +839,12 @@ async def message_by_id(msg_id: uuid.UUID) -> dict | None:
 # ---------------------------------------------------------------------------
 # Message content
 # ---------------------------------------------------------------------------
+
+async def user_cache_get(user_id: uuid.UUID, peer_id: uuid.UUID) -> dict | None:
+    return await _db.fetchrow(
+        "SELECT * FROM user_cache WHERE user_id=$1 AND peer_id=$2", user_id, peer_id
+    )
+
 
 async def user_cache_upsert(user_id: uuid.UUID, peer_id: uuid.UUID, name: str | None, avatar: str | None):
     await _db.execute(
@@ -496,6 +873,18 @@ async def message_content_local(msg_id: uuid.UUID) -> dict | None:
 # ---------------------------------------------------------------------------
 
 async def peer_upsert(address: str, name: str | None, fingerprint: str | None) -> dict:
+    # Deduplicate by fingerprint: same cert = same server, update address if changed
+    if fingerprint:
+        existing = await _db.fetchrow(
+            "SELECT * FROM peers WHERE ssl_fingerprint=$1", fingerprint
+        )
+        if existing:
+            await _db.execute(
+                "UPDATE peers SET address=$1, name=COALESCE($2, name) WHERE ssl_fingerprint=$3",
+                address, name, fingerprint,
+            )
+            return await _db.fetchrow("SELECT * FROM peers WHERE ssl_fingerprint=$1", fingerprint)
+
     pid = _new_id()
     if _is_sqlite:
         await _db.execute(
@@ -518,6 +907,17 @@ async def peer_upsert(address: str, name: str | None, fingerprint: str | None) -
     )
 
 
+async def peer_set_status(peer_id: uuid.UUID, status: str):
+    await _db.execute("UPDATE peers SET status=$2 WHERE id=$1", peer_id, status)
+
+
+async def peer_update_last_seen(address: str):
+    await _db.execute(
+        "UPDATE peers SET last_seen=$2 WHERE address=$1",
+        address, _now(),
+    )
+
+
 async def peer_by_id(pid: uuid.UUID) -> dict | None:
     return await _db.fetchrow("SELECT * FROM peers WHERE id=$1", pid)
 
@@ -530,5 +930,12 @@ async def peers_all() -> list[dict]:
     return await _db.fetch("SELECT * FROM peers ORDER BY name")
 
 
+async def peer_block(pid: uuid.UUID):
+    """Soft-delete: block the peer so they can't connect but history is preserved."""
+    await _db.execute("UPDATE peers SET status='blocked' WHERE id=$1", pid)
+
+
 async def peer_delete(pid: uuid.UUID):
+    """Hard delete — only call when peer is already blocked."""
+    await _db.execute("UPDATE peers SET ssl_fingerprint=NULL WHERE id=$1", pid)
     await _db.execute("DELETE FROM peers WHERE id=$1", pid)

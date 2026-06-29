@@ -1,42 +1,55 @@
-<section class="chat-page">
+<div class="chat-header">
+    <button id="back_btn" class="back-btn" title="Back">←</button>
+    <span id="chat_icon" class="chat-icon"></span>
+    <span id="chat_title" class="chat-title"></span>
+    <button id="members_btn" class="secondary hidden">Members</button>
+    <button id="bans_btn" class="secondary hidden">Ban users</button>
+</div>
 
-    <div id="member_manager" class="hidden">
-        <div class="member_columns">
-            <div>
-                <h4>Members</h4>
-                <ul id="members_list"
-                    class="member-drop-zone"
-                    ondragover="event.preventDefault()"
-                    ondrop="communicatie.drop_member(event, true)">
-                </ul>
-            </div>
-            <div>
-                <h4>Not members</h4>
-                <ul id="non_members_list"
-                    class="member-drop-zone"
-                    ondragover="event.preventDefault()"
-                    ondrop="communicatie.drop_member(event, false)">
-                </ul>
-            </div>
-        </div>
+<div id="member_manager" class="hidden overlay">
+    <div class="overlay-header">
+        <span id="manager_title">Members</span>
         <button id="close_member_manager">Done</button>
     </div>
-
-    <div id="messages" class="messages"></div>
-
-    <div id="input_area" class="input-area">
-        <div id="reply_context" class="hidden"></div>
-        <div id="image_preview" class="hidden"></div>
-        <div class="input-row">
-            <div id="drop_zone"
-                 class="drop-zone"
-                 ondragover="event.preventDefault()"
-                 ondrop="communicatie.drop_image(event)">
-                Drop image
+    <div class="member_columns">
+        <div>
+            <div class="col-header">
+                <h4 id="col_left_title">Members</h4>
+                <input type="search" id="filter_left" class="filter-input-sm" placeholder="Filter…">
             </div>
-            <textarea id="message_input" placeholder="Message…" rows="1" maxlength="4096"></textarea>
-            <button id="send_btn">Send</button>
+            <ul id="members_list"
+                class="member-drop-zone"
+                ondragover="event.preventDefault()"
+                ondrop="communicatie.drop_member(event, true)">
+            </ul>
+        </div>
+        <div>
+            <div class="col-header">
+                <h4 id="col_right_title">Not members</h4>
+                <input type="search" id="filter_right" class="filter-input-sm" placeholder="Filter…">
+            </div>
+            <ul id="non_members_list"
+                class="member-drop-zone"
+                ondragover="event.preventDefault()"
+                ondrop="communicatie.drop_member(event, false)">
+            </ul>
         </div>
     </div>
+</div>
 
-</section>
+<div id="messages" class="messages"></div>
+
+<div id="input_area" class="input-area">
+    <div id="reply_context" class="hidden reply-context"></div>
+    <div id="image_preview" class="hidden"></div>
+    <div class="input-row">
+        <input type="file" id="image_file_input" accept="image/*" style="display:none">
+        <div id="drop_zone"
+             class="drop-zone"
+             ondragover="event.preventDefault(); this.classList.add('active')"
+             ondragleave="this.classList.remove('active')"
+             ondrop="communicatie.drop_image(event)">+</div>
+        <textarea id="message_input" placeholder="Message…" rows="1" maxlength="4096"></textarea>
+        <button id="send_btn">Send</button>
+    </div>
+</div>
