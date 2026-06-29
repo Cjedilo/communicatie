@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claim your server — Messages</title>
+    <link rel="stylesheet" href="{{ base_path }}/communicatie.css?v=50">
+</head>
+<body>
+<div id="app" class="no-nav">
+<main id="main">
+<div class="login-page">
+    <h1>Messages</h1>
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:-.5rem">Claim your server</p>
+
+    <div class="login-card" style="max-width:28rem">
+        <h2>Create the owner account</h2>
+        <p style="font-size:.85rem;color:var(--text-dim);margin-bottom:1rem">
+            The first account registered here becomes the server owner
+            with full access to all settings. This URL works once.
+        </p>
+        <form id="setup_form">
+            <input type="text"     id="setup_name"     placeholder="Username"             autocomplete="username"     required>
+            <input type="password" id="setup_password" placeholder="Password (min 8 chars)" autocomplete="new-password" required style="margin-top:.5rem">
+            <button type="submit" style="margin-top:.75rem;width:100%">Claim this server</button>
+        </form>
+        <p id="setup_error" style="color:var(--accent);font-size:.85rem;margin-top:.5rem;display:none"></p>
+    </div>
+</div>
+</main>
+</div>
+<script>
+document.getElementById("setup_form").addEventListener("submit", function(e) {
+    e.preventDefault();
+    var name = document.getElementById("setup_name").value.trim();
+    var pass = document.getElementById("setup_password").value;
+    var err  = document.getElementById("setup_error");
+    err.style.display = "none";
+    fetch(window.location.pathname, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name: name, password: pass})
+    }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok) {
+            window.location.href = "{{ base_path }}/";
+        } else {
+            err.textContent = d.reason;
+            err.style.display = "block";
+        }
+    });
+});
+</script>
+</body>
+</html>

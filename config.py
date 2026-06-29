@@ -19,10 +19,10 @@ else:
 BASE_PATH = (db_config.cfg_get("base_path") or os.getenv("BASE_PATH", "")).rstrip("/")
 # Note: default password is 'communicatie' (double-m)
 
-# Server
-HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "443"))
-PORT_HTTP = int(os.getenv("PORT_HTTP", "80"))
+# Server — _config.db takes precedence over env, env takes precedence over defaults
+HOST      = db_config.cfg_get("host")      or os.getenv("HOST",      "0.0.0.0")
+PORT      = int(db_config.cfg_get("port")      or os.getenv("PORT",      "443"))
+PORT_HTTP = int(db_config.cfg_get("port_http") or os.getenv("PORT_HTTP", "80"))
 
 # SSL
 _base    = os.path.dirname(os.path.abspath(__file__))
@@ -37,12 +37,10 @@ LETSENCRYPT_STAGING = os.getenv("LETSENCRYPT_STAGING", "false").lower() == "true
 
 # Sessions
 SESSION_COOKIE    = "session"
-SESSION_MAX_AGE   = int(os.getenv("SESSION_MAX_AGE", str(60 * 60 * 24 * 30)))  # 30 days
 SESSION_TOKEN_LEN = 48
 
 # Uploads
-UPLOAD_DIR      = db_config.cfg_get("upload_dir") or os.getenv("UPLOAD_DIR", "/var/www/appelo.nl/dev/communicatie/img")
-UPLOAD_MAX_MB   = int(os.getenv("UPLOAD_MAX_MB", "10"))
+UPLOAD_DIR = db_config.cfg_get("upload_dir") or os.getenv("UPLOAD_DIR", "/var/www/appelo.nl/dev/communicatie/img")
 ALLOWED_MIMES   = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 ALLOWED_MAGIC   = {
     b"\xff\xd8\xff": "image/jpeg",
@@ -51,9 +49,21 @@ ALLOWED_MAGIC   = {
     b"RIFF":         "image/webp",  # checked further below
 }
 
-# Rate limiting (requests per window)
-RATE_LIMIT_LOGIN    = int(os.getenv("RATE_LIMIT_LOGIN",    "10"))   # per minute per IP
-RATE_LIMIT_MESSAGES = int(os.getenv("RATE_LIMIT_MESSAGES", "60"))   # per minute per user
+# Rate limiting (requests per window) — overridable via advanced settings UI
+RATE_LIMIT_LOGIN    = int(db_config.cfg_get("rate_limit_login")    or os.getenv("RATE_LIMIT_LOGIN",    "10"))
+RATE_LIMIT_MESSAGES = int(db_config.cfg_get("rate_limit_messages") or os.getenv("RATE_LIMIT_MESSAGES", "60"))
+
+# Reverse-proxy IPs we trust to set X-Forwarded-For.
+TRUSTED_PROXIES = set(filter(None, (p.strip() for p in (
+    db_config.cfg_get("trusted_proxies")
+    or os.getenv("TRUSTED_PROXIES", "127.0.0.1,::1")
+).split(","))))
 
 # Federation
-PEER_CONNECT_TIMEOUT = int(os.getenv("PEER_CONNECT_TIMEOUT", "10"))
+PEER_CONNECT_TIMEOUT = int(db_config.cfg_get("peer_connect_timeout") or os.getenv("PEER_CONNECT_TIMEOUT", "10"))
+
+# Sessions — overridable via advanced settings UI (requires restart)
+SESSION_MAX_AGE = int(db_config.cfg_get("session_max_age") or os.getenv("SESSION_MAX_AGE", str(60 * 60 * 24 * 30)))
+
+# Uploads — overridable via advanced settings UI (requires restart)
+UPLOAD_MAX_MB = int(db_config.cfg_get("upload_max_mb") or os.getenv("UPLOAD_MAX_MB", "10"))

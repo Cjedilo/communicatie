@@ -1,0 +1,65 @@
+{% extends "wiki/_base.html" %}
+{% set active = "peers" %}
+{% block title %}Peers & federation{% endblock %}
+
+{% block content %}
+<h1>Peers &amp; federation</h1>
+<p class="wiki-lead">The idea at the heart of Messages: your server talks to other servers, so you can talk to their users — without any of you giving up control of your own data.</p>
+
+<nav class="wiki-toc">
+    <a href="#the-idea">The idea</a>
+    <a href="#what-changes">What changes when you connect</a>
+    <a href="#policy">Peer policy</a>
+    <a href="#visibility">What they can see</a>
+    <a href="#removing">Removing a peer</a>
+</nav>
+
+<hr>
+
+<h2 id="the-idea">The idea</h2>
+<p>Imagine email — but for chat. You have a Gmail account. Your friend has an Outlook account. You can still email each other, because both servers speak the same language and agree to exchange messages. Neither of you has to switch providers, and neither company owns the conversation.</p>
+<p>Messages works the same way. Each server is independent: it stores its own users, their messages, their images. But servers can connect to each other — and once they do, their users can see each other's channels and talk directly, as if they were on the same server.</p>
+<p>The servers that talk to yours are called <strong>peers</strong>. Connecting to a peer is called <strong>federation</strong>.</p>
+<p>You stay in control of your server. Your peer stays in control of theirs. No central platform owns any of it.</p>
+
+<hr>
+
+<h2 id="what-changes">What changes when you connect to a peer</h2>
+<p>Once two servers are federated:</p>
+<ul>
+    <li>Each other's <strong>public channels</strong> appear in the Channels page under <em>Remote channels</em></li>
+    <li>Each other's <strong>users</strong> appear in the Users page, grouped by their home server</li>
+    <li>You can <strong>invite each other's users</strong> to private channels</li>
+    <li>Users on either server can <strong>message each other directly</strong></li>
+</ul>
+<p>How to set up a peer connection is covered in <a href="{{ base_path }}/wiki/server">Server management</a>.</p>
+
+<hr>
+
+<h2 id="policy">Peer policy</h2>
+<p>You decide who can connect to your server. Three options:</p>
+<ul>
+    <li><strong>Open</strong> — any Messages server can connect automatically. Good for a community you want to be discoverable.</li>
+    <li><strong>Approval required</strong> — connection requests queue up for you to review. The other server appears as <em>Awaiting approval</em> until you accept or decline.</li>
+    <li><strong>Closed</strong> — no new connections are accepted. Existing peers continue working; no new ones can be added from the outside.</li>
+</ul>
+<p>Both sides have their own policy, independently. If you're open and they require approval, you'll wait until they approve you — and vice versa.</p>
+
+<hr>
+
+<h2 id="visibility">What they can and can't see</h2>
+<p>Federation is not the same as merging two servers. Each server still controls its own data:</p>
+<ul>
+    <li><strong>Public channels</strong> — visible and accessible to all connected peers</li>
+    <li><strong>Private channels</strong> — only accessible if a user from that peer has been explicitly added as a member</li>
+    <li><strong>Direct messages</strong> — never visible to peer servers; only the two users involved can read them</li>
+    <li><strong>Message content</strong> — always fetched from the originating server on demand. Nothing is copied or cached on the peer's side. Delete a message or image on your server and the next fetch returns nothing — anyone who already has it on screen may still see it until they navigate away, but it can no longer be retrieved.</li>
+</ul>
+<p class="wiki-aside">For the full picture of what's stored where, see <a href="{{ base_path }}/wiki/privacy">Privacy &amp; data</a>. For how trust is established technically, see <a href="{{ base_path }}/wiki/security">Security model</a>.</p>
+
+<hr>
+
+<h2 id="removing">Removing a peer</h2>
+<p>You can block or delete a peer at any time. The connection is cut immediately — their server can no longer post to your channels or fetch your content. Messages already delivered to their users remain visible on their side, but nothing new flows in either direction.</p>
+
+{% endblock %}

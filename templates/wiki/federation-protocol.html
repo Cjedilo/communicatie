@@ -1,0 +1,75 @@
+{% extends "wiki/_base.html" %}
+{% set active = "federation-protocol" %}
+{% block title %}Federation protocol{% endblock %}
+
+{% block content %}
+<h1>Federation protocol</h1>
+<p class="wiki-lead">How two Messages servers communicate — the wire protocol, message flow, and design decisions behind federation.</p>
+
+<nav class="wiki-toc">
+    <a href="#transport">Transport</a>
+    <a href="#handshake">Handshake</a>
+    <a href="#messages">Message flow</a>
+    <a href="#content-ownership">Content ownership</a>
+    <a href="#subscriptions">Subscriptions</a>
+    <a href="#sessions">Persistent sessions</a>
+</nav>
+
+<hr>
+
+<h2 id="transport">Transport</h2>
+<p>Federation uses <strong>WebSocket over TLS</strong> (<code>wss://</code>). Each server exposes a <code>/peer</code> endpoint. All messages are JSON objects with a <code>type</code> field. There is no binary framing or custom protocol — a <code>wscat</code> session is sufficient to inspect the wire.</p>
+
+<hr>
+
+<h2 id="handshake">Handshake</h2>
+<p>When server A connects to server B for the first time:</p>
+<ol>
+    <li>A opens a WebSocket to <code>B/peer</code> and sends a <code>peer_details</code> message with its own address and name.</li>
+    <li>B checks its peer policy (open / approval / closed) and responds.</li>
+    <li>If approved, B issues A a <strong>shared secret token</strong> in the response. A stores this token and attaches it to every subsequent request.</li>
+    <li>A records B's TLS certificate fingerprint (TOFU). Future connections verify against this fingerprint.</li>
+</ol>
+<p>On reconnection the handshake is skipped — the persistent session reuses the stored token.</p>
+
+<hr>
+
+<h2 id="messages">Message flow</h2>
+<p>When a user on server A posts to a channel hosted on server B:</p>
+<ol>
+    <li>A sends a <code>new_message</code> request to B with the message metadata, sender identity, and text content.</li>
+    <li>B stores the <strong>message index</strong> (who, when, which channel) and pushes a notification to any local clients watching that channel.</li>
+    <li>B does <strong>not</strong> store the message content — only A holds the content. B stores only enough to know a message exists.</li>
+</ol>
+<p>When a user on B later reads that message, B fetches the content from A on demand via <code>get_message</code>. If A is offline, the message shows as temporarily unavailable.</p>
+
+<hr>
+
+<h2 id="content-ownership">Content ownership</h2>
+<p>This is the central design decision of the protocol: <strong>the originating server is the sole source of truth for message content</strong>.</p>
+<p>Remote servers store message metadata (index entries) but never cache content. This means:</p>
+<ul>
+    <li>The author controls their content — going offline makes old messages temporarily unavailable; blocking a peer makes them permanently unavailable to that peer.</li>
+    <li>There is no content synchronisation problem — there is only one copy.</li>
+    <li>Storage requirements on receiving servers are minimal.</li>
+</ul>
+<p>Images work the same way. The <code>📷</code> sentinel in the message index tells receiving servers an image exists; the actual file is fetched via the image proxy when displayed.</p>
+
+<hr>
+
+<h2 id="subscriptions">Subscriptions</h2>
+<p>Servers can subscribe to channels or to the full stream of a peer:</p>
+<ul>
+    <li><code>subscribe</code> — receive live <code>new_message</code> pushes for a specific channel.</li>
+    <li><code>subscribe_stream</code> — receive all new messages across all accessible channels on that peer.</li>
+</ul>
+<p>Both require a valid auth token. Private channel subscriptions additionally require that the subscribing peer has at least one member in that channel.</p>
+
+<hr>
+
+<h2 id="sessions">Persistent sessions</h2>
+<p>Outbound connections are pooled — one persistent WebSocket per peer, reused across requests. This avoids the overhead of a TLS handshake per request and allows pipelined operations (multiple requests in flight on one connection under a lock).</p>
+<p>Sessions idle for more than 10 minutes are closed automatically. If a session fails mid-request (timeout, network error), the socket is dropped immediately so the next request reconnects cleanly rather than reading a stale response.</p>
+<p>Tokens are attached automatically to every outbound request by the session pool, so individual call sites don't need to handle authentication.</p>
+
+{% endblock %}

@@ -46,6 +46,15 @@ def cfg_set(key: str, value: str) -> None:
         )
 
 
+def setup_secret_get() -> str | None:
+    return cfg_get("setup_secret")
+
+
+def setup_secret_clear() -> None:
+    with _open() as c:
+        c.execute("DELETE FROM config WHERE key='setup_secret'")
+
+
 def succession_add(record: dict) -> None:
     with _open() as c:
         c.execute(

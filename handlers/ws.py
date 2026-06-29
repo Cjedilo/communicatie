@@ -1065,6 +1065,214 @@ async def _handle_delete_peer(data: dict, session: dict, ws: web.WebSocketRespon
         return _ok("delete_peer", id=pid, removed=False)
 
 
+async def _handle_read_update_config(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    owner_id = await db.setting_get("owner_id")
+    if str(session["user_id"]) != owner_id:
+        return _err("read_update_config", "Not authorised")
+
+    auto_update = db_config.cfg_get("auto_update") == "1"
+
+    import asyncio as _aio, subprocess as _sub
+    from pathlib import Path as _Path
+    repo_dir = str(_Path(__file__).parent.parent)
+
+    async def _git(*args):
+        try:
+            r = await _aio.get_event_loop().run_in_executor(
+                None, lambda: _sub.run(["git", "-C", repo_dir] + list(args),
+                                       capture_output=True, text=True, timeout=10))
+            return r.stdout.strip()
+        except Exception:
+            return ""
+
+    current = await _git("describe", "--tags", "--exact-match") \
+           or await _git("describe", "--tags") \
+           or await _git("rev-parse", "--short", "HEAD") \
+           or "unknown"
+
+    return _ok("read_update_config", auto_update=auto_update, current_version=current)
+
+
+async def _handle_set_update_config(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    owner_id = await db.setting_get("owner_id")
+    if str(session["user_id"]) != owner_id:
+        return _err("set_update_config", "Not authorised")
+
+    auto_update = bool(data.get("auto_update", False))
+    db_config.cfg_set("auto_update", "1" if auto_update else "0")
+    return _ok("set_update_config", auto_update=auto_update)
+
+
+async def _handle_check_update(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    owner_id = await db.setting_get("owner_id")
+    if str(session["user_id"]) != owner_id:
+        return _err("check_update", "Not authorised")
+
+    import asyncio as _aio, subprocess as _sub
+    from pathlib import Path as _Path
+    repo_dir = str(_Path(__file__).parent.parent)
+
+    async def _git(*args, timeout=30):
+        try:
+            r = await _aio.get_event_loop().run_in_executor(
+                None, lambda: _sub.run(["git", "-C", repo_dir] + list(args),
+                                       capture_output=True, text=True, timeout=timeout))
+            return r.stdout.strip()
+        except Exception:
+            return ""
+
+    await _git("fetch", "--tags", "--quiet", timeout=30)
+
+    current = await _git("describe", "--tags", "--exact-match") \
+           or await _git("describe", "--tags") \
+           or await _git("rev-parse", "--short", "HEAD") \
+           or "unknown"
+
+    tags = await _git("tag", "--sort=-version:refname")
+    latest = tags.splitlines()[0] if tags else ""
+
+    if not latest:
+        return _ok("check_update", current=current, latest="", update_available=False,
+                   message="No release tags found in repository.")
+
+    behind_str = await _git("rev-list", "--count", f"HEAD..refs/tags/{latest}")
+    try:
+        behind = int(behind_str)
+    except (ValueError, TypeError):
+        behind = 0
+
+    update_available = behind > 0
+    return _ok("check_update", current=current, latest=latest,
+               update_available=update_available, behind=behind)
+
+
+async def _handle_apply_update(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    owner_id = await db.setting_get("owner_id")
+    if str(session["user_id"]) != owner_id:
+        return _err("apply_update", "Not authorised")
+
+    import subprocess as _sub, sys as _sys, os as _os
+    from pathlib import Path as _Path
+    repo_dir = str(_Path(__file__).parent.parent)
+
+    # Enable auto_update temporarily so update.sh proceeds even if the setting is off
+    db_config.cfg_set("auto_update", "1")
+
+    script = _Path(repo_dir) / "update.sh"
+    if not script.exists():
+        return _err("apply_update", "update.sh not found")
+
+    # Run detached so the script survives if systemctl restarts our process
+    try:
+        _sub.Popen(
+            ["bash", str(script)],
+            stdout=_sub.DEVNULL, stderr=_sub.DEVNULL,
+            close_fds=True, start_new_session=True,
+            cwd=repo_dir,
+        )
+    except Exception as e:
+        return _err("apply_update", f"Could not start update: {e}")
+
+    return _ok("apply_update", message="Update started. The server will restart if a new version is found.")
+
+
+async def _handle_read_advanced_config(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    owner_id = await db.setting_get("owner_id")
+    if str(session["user_id"]) != owner_id:
+        return _err("read_advanced_config", "Not authorised")
+    return _ok("read_advanced_config",
+        # Network (restart required)
+        base_path            = config.BASE_PATH,
+        host                 = config.HOST,
+        port                 = config.PORT,
+        port_http            = config.PORT_HTTP,
+        port_default         = 443,
+        port_http_default    = 80,
+        # Rate limiting (hot-apply)
+        rate_limit_login     = config.RATE_LIMIT_LOGIN,
+        rate_limit_messages  = config.RATE_LIMIT_MESSAGES,
+        trusted_proxies      = ",".join(sorted(config.TRUSTED_PROXIES)),
+        # Federation (hot-apply)
+        peer_connect_timeout = config.PEER_CONNECT_TIMEOUT,
+        # Sessions (restart required)
+        session_max_age_days = config.SESSION_MAX_AGE // 86400,
+        # Uploads (restart required)
+        upload_max_mb        = config.UPLOAD_MAX_MB,
+    )
+
+
+async def _handle_set_advanced_config(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    owner_id = await db.setting_get("owner_id")
+    if str(session["user_id"]) != owner_id:
+        return _err("set_advanced_config", "Not authorised")
+
+    needs_restart = False
+
+    def _int(key, lo, hi):
+        v = data.get(key)
+        if v is None:
+            return None
+        try:
+            return max(lo, min(hi, int(v)))
+        except (ValueError, TypeError):
+            return None
+
+    # ── Hot-apply: rate limiting ──────────────────────────────────────────
+    rl_login = _int("rate_limit_login", 1, 1000)
+    if rl_login is not None:
+        config.RATE_LIMIT_LOGIN = rl_login
+        db_config.cfg_set("rate_limit_login", str(rl_login))
+
+    rl_msg = _int("rate_limit_messages", 1, 10000)
+    if rl_msg is not None:
+        config.RATE_LIMIT_MESSAGES = rl_msg
+        db_config.cfg_set("rate_limit_messages", str(rl_msg))
+
+    trusted = data.get("trusted_proxies")
+    if trusted is not None:
+        cleaned = ",".join(filter(None, (p.strip() for p in str(trusted).split(","))))
+        config.TRUSTED_PROXIES = set(filter(None, cleaned.split(",")))
+        db_config.cfg_set("trusted_proxies", cleaned)
+
+    # ── Hot-apply: federation ─────────────────────────────────────────────
+    timeout = _int("peer_connect_timeout", 1, 120)
+    if timeout is not None:
+        config.PEER_CONNECT_TIMEOUT = timeout
+        db_config.cfg_set("peer_connect_timeout", str(timeout))
+
+    # ── Restart required ──────────────────────────────────────────────────
+    host = data.get("host")
+    if host is not None:
+        h = str(host).strip()
+        db_config.cfg_set("host", h)
+        needs_restart = True
+
+    port = _int("port", 1, 65535)
+    if port is not None:
+        db_config.cfg_set("port", str(port))
+        needs_restart = True
+
+    port_http = _int("port_http", 0, 65535)
+    if port_http is not None:
+        db_config.cfg_set("port_http", str(port_http))
+        needs_restart = True
+
+    session_days = _int("session_max_age_days", 1, 3650)
+    if session_days is not None:
+        secs = session_days * 86400
+        if secs != config.SESSION_MAX_AGE:
+            db_config.cfg_set("session_max_age", str(secs))
+            needs_restart = True
+
+    upload_mb = _int("upload_max_mb", 1, 500)
+    if upload_mb is not None:
+        if upload_mb != config.UPLOAD_MAX_MB:
+            db_config.cfg_set("upload_max_mb", str(upload_mb))
+            needs_restart = True
+
+    return _ok("set_advanced_config", needs_restart=needs_restart)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -1102,8 +1310,14 @@ _HANDLERS = {
     "set_cert_config":  _handle_set_cert_config,
     "read_upload_config": _handle_read_upload_config,
     "set_upload_config":  _handle_set_upload_config,
-    "read_db_config":   _handle_read_db_config,
-    "set_db_config":    _handle_set_db_config,
+    "read_db_config":        _handle_read_db_config,
+    "set_db_config":         _handle_set_db_config,
+    "read_advanced_config":  _handle_read_advanced_config,
+    "set_advanced_config":   _handle_set_advanced_config,
+    "read_update_config":    _handle_read_update_config,
+    "set_update_config":     _handle_set_update_config,
+    "check_update":          _handle_check_update,
+    "apply_update":          _handle_apply_update,
     "read_peers":       _handle_read_peers,
     "set_peer_policy":  _handle_set_peer_policy,
     "approve_peer":     _handle_approve_peer,

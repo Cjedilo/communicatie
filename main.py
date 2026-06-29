@@ -46,6 +46,36 @@ async def _cleanup_sessions(app: web.Application):
                 log.warning("Session purge failed: %s", e)
 
 
+async def _ensure_setup_secret(app: web.Application):
+    """If no owner exists yet, make sure a setup secret is available and log the URL."""
+    import secrets as _secrets
+    import db_config as _dbc
+    import config as _cfg
+
+    owner = await db.setting_get("owner_id")
+    if owner:
+        return  # already claimed
+
+    secret = _dbc.setup_secret_get()
+    if not secret:
+        secret = _secrets.token_urlsafe(32)
+        _dbc.cfg_set("setup_secret", secret)
+
+    address = await db.setting_get("peer_address") or ""
+    if address:
+        base = address.replace("wss://", "https://").replace("ws://", "http://")
+        url  = f"{base}/setup/{secret}"
+    else:
+        port = _cfg.PORT
+        bp   = _cfg.BASE_PATH
+        url  = f"https://localhost:{port}{bp}/setup/{secret}"
+
+    log.warning("=" * 60)
+    log.warning("Server not yet claimed. Open this URL to become owner:")
+    log.warning("  %s", url)
+    log.warning("=" * 60)
+
+
 async def _start_cleanup(app: web.Application):
     app["_cleanup"] = asyncio.create_task(_cleanup_sessions(app))
 
@@ -55,7 +85,12 @@ async def _stop_cleanup(app: web.Application):
 
 
 def build_app() -> web.Application:
-    app = web.Application()
+    # Allow request bodies up to the image-upload limit (+1 MB for multipart
+    # overhead). aiohttp's 1 MB default would otherwise reject 1–10 MB uploads
+    # before our own size check in handlers.http runs.
+    app = web.Application(
+        client_max_size=(config.UPLOAD_MAX_MB + 1) * 1024 * 1024
+    )
 
     templates_dir = Path(__file__).parent / "templates"
     aiohttp_jinja2.setup(
@@ -65,6 +100,7 @@ def build_app() -> web.Application:
     )
 
     app.on_startup.append(db.init)
+    app.on_startup.append(_ensure_setup_secret)
     app.on_cleanup.append(db.close)
     app.on_cleanup.append(close_session)
     app.on_startup.append(_start_cleanup)

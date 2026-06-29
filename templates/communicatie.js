@@ -155,6 +155,7 @@ function _channel_icon(ch) {
         "/stream.html":   setup_stream_page,
         "/peers.html":    setup_peers_page,
         "/server.html":   setup_server_page,
+        "/advanced.html": setup_advanced_page,
         "/users.html":    setup_users_page,
         "/channels.html": setup_channels_page,
         "/user.html":     setup_user_page,
@@ -1293,6 +1294,114 @@ function load_channel() {
         });
     }
 
+    function setup_advanced_page() {
+        document.querySelectorAll(".info-btn").forEach(function (btn) {
+            btn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                var open = btn.classList.contains("open");
+                document.querySelectorAll(".info-btn.open").forEach(function (b) { b.classList.remove("open"); });
+                if (!open) btn.classList.add("open");
+            });
+        });
+
+        if (!is_owner) return;
+
+        request("read_advanced_config").then(function (d) {
+            if (!d.ok) return;
+
+            document.getElementById("adv_base_path").value      = d.base_path || "";
+            document.getElementById("adv_host").value           = d.host || "";
+            document.getElementById("adv_port").value           = d.port || "";
+            document.getElementById("adv_port_http").value      = d.port_http || 0;
+            document.getElementById("adv_rate_login").value     = d.rate_limit_login;
+            document.getElementById("adv_rate_messages").value  = d.rate_limit_messages;
+            document.getElementById("adv_trusted_proxies").value = d.trusted_proxies || "";
+            document.getElementById("adv_peer_timeout").value   = d.peer_connect_timeout;
+            document.getElementById("adv_session_days").value   = d.session_max_age_days;
+            document.getElementById("adv_upload_mb").value      = d.upload_max_mb;
+        });
+
+        function _save(ids, show_ok_id, show_restart_id) {
+            var payload = {};
+            ids.forEach(function (id) {
+                var el = document.getElementById(id);
+                if (el && !el.readOnly) payload[id.replace("adv_", "")] = el.value;
+            });
+            request("set_advanced_config", payload).then(function (r) {
+                if (!r.ok) { show_error(r.reason); return; }
+                if (r.needs_restart && show_restart_id)
+                    document.getElementById(show_restart_id).classList.remove("hidden");
+                if (!r.needs_restart && show_ok_id)
+                    document.getElementById(show_ok_id).classList.remove("hidden");
+            });
+        }
+
+        document.getElementById("adv_network_save").addEventListener("click", function () {
+            _save(["adv_host", "adv_port", "adv_port_http"], null, "adv_network_restart");
+        });
+        document.getElementById("adv_ratelimit_save").addEventListener("click", function () {
+            _save(["adv_rate_login", "adv_rate_messages", "adv_trusted_proxies"], "adv_ratelimit_ok", null);
+        });
+        document.getElementById("adv_federation_save").addEventListener("click", function () {
+            _save(["adv_peer_timeout"], "adv_federation_ok", null);
+        });
+        document.getElementById("adv_sessions_save").addEventListener("click", function () {
+            _save(["adv_session_days"], null, "adv_sessions_restart");
+        });
+        document.getElementById("adv_uploads_save").addEventListener("click", function () {
+            _save(["adv_upload_mb"], null, "adv_uploads_restart");
+        });
+
+        // ── Updates ────────────────────────────────────────────────────────────
+        request("read_update_config").then(function (d) {
+            if (!d.ok) return;
+            var verEl = document.getElementById("adv_version_line");
+            if (verEl) verEl.textContent = "Current version: " + d.current_version;
+            var cb = document.getElementById("adv_auto_update");
+            if (cb) cb.checked = !!d.auto_update;
+        });
+
+        document.getElementById("adv_auto_update").addEventListener("change", function () {
+            request("set_update_config", { auto_update: this.checked }).then(function (r) {
+                if (!r.ok) show_error(r.reason);
+            });
+        });
+
+        document.getElementById("adv_check_update_btn").addEventListener("click", function () {
+            var statusEl = document.getElementById("adv_update_status");
+            var applyBtn = document.getElementById("adv_apply_update_btn");
+            statusEl.textContent = "Checking…";
+            applyBtn.classList.add("hidden");
+            request("check_update").then(function (d) {
+                if (!d.ok) { statusEl.textContent = "Error: " + d.reason; return; }
+                if (d.update_available) {
+                    statusEl.textContent = "Update available: " + d.current + " → " + d.latest;
+                    applyBtn.classList.remove("hidden");
+                } else if (d.latest) {
+                    statusEl.textContent = "Up to date (" + d.current + ")";
+                } else {
+                    statusEl.textContent = d.message || "No releases found.";
+                }
+            });
+        });
+
+        document.getElementById("adv_apply_update_btn").addEventListener("click", function () {
+            var statusEl = document.getElementById("adv_update_status");
+            var self = this;
+            self.disabled = true;
+            statusEl.textContent = "Applying update…";
+            request("apply_update").then(function (d) {
+                if (!d.ok) {
+                    statusEl.textContent = "Error: " + d.reason;
+                    self.disabled = false;
+                    return;
+                }
+                statusEl.textContent = d.message + " Reconnecting…";
+                self.classList.add("hidden");
+            });
+        });
+    }
+
     function setup_server_page() {
         document.querySelectorAll(".info-btn").forEach(function (btn) {
             btn.addEventListener("click", function (e) {
@@ -1302,6 +1411,15 @@ function load_channel() {
                 if (!open) btn.classList.add("open");
             });
         });
+
+        var adv_link = document.getElementById("advanced_link");
+        if (adv_link) {
+            if (!is_owner) { adv_link.style.display = "none"; }
+            else adv_link.addEventListener("click", function (e) {
+                e.preventDefault();
+                show_page("/advanced.html");
+            });
+        }
 
         function refresh_identity(d) {
             if (!d || !d.ok) return;
@@ -1637,8 +1755,8 @@ function load_channel() {
         td_ident.appendChild(make("span", null, u.name));
         td_ident.addEventListener("click", function () { open_user_profile(u); });
 
-        tr.appendChild(td_acts);
         tr.appendChild(td_ident);
+        tr.appendChild(td_acts);
         return tr;
     }
 

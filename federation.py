@@ -19,6 +19,7 @@ that is exchanged on first connect and stored in the DB.
 import asyncio
 import json
 import logging
+import secrets
 import time as _time
 import uuid
 from contextlib import asynccontextmanager
@@ -148,13 +149,53 @@ class _PeerSession:
         if not self._ws or self._ws.closed:
             await self._open()
 
+    def _with_token(self, msg: dict) -> dict:
+        """Attach our shared secret for this peer so they can authenticate the request."""
+        token = self.peer.get("auth_token")
+        if token and "auth_token" not in msg:
+            return {**msg, "auth_token": token}
+        return msg
+
+    async def _ensure_token(self):
+        """Lazily obtain the shared secret via a peer_details handshake if we don't
+        have one yet (e.g. right after the remote side approved us). Runs at most
+        one extra round-trip and only while the token is still missing."""
+        if self.peer.get("auth_token"):
+            return
+        # Another code path may have already stored it — refresh from DB first.
+        refreshed = await db.peer_by_id(self.peer["id"])
+        if refreshed and refreshed.get("auth_token"):
+            self.peer = refreshed
+            return
+        our_name    = await db.setting_get("peer_name") or ""
+        our_address = await db.setting_get("peer_address") or _detect_outbound_address()
+        await self._ws.send_str(_dumps({
+            "type": "peer_details", "from_address": our_address, "from_name": our_name,
+        }))
+        raw     = await asyncio.wait_for(self._ws.receive_str(), timeout=10)
+        details = json.loads(raw)
+        token   = details.get("auth_token")
+        if token:
+            await db.peer_set_auth_token(self.peer["id"], token)
+            refreshed = await db.peer_by_id(self.peer["id"])
+            if refreshed:
+                self.peer = refreshed
+
     async def request(self, msg: dict, timeout: int = 15) -> dict:
         """Send one message and return the direct response."""
         async with self._lock:
             await self._ensure()
-            await self._ws.send_str(_dumps(msg))
-            self._last_used = _time.monotonic()
-            raw = await asyncio.wait_for(self._ws.receive_str(), timeout=timeout)
+            await self._ensure_token()
+            try:
+                await self._ws.send_str(_dumps(self._with_token(msg)))
+                self._last_used = _time.monotonic()
+                raw = await asyncio.wait_for(self._ws.receive_str(), timeout=timeout)
+            except Exception:
+                # A timeout/error after sending can leave the unread reply on the
+                # socket; drop it so the next request reconnects instead of reading
+                # a stale response.
+                await self.close()
+                raise
             return json.loads(raw)
 
     @asynccontextmanager
@@ -165,8 +206,15 @@ class _PeerSession:
         """
         async with self._lock:
             await self._ensure()
-            yield self._ws
-            self._last_used = _time.monotonic()
+            await self._ensure_token()
+            try:
+                yield self._ws
+                self._last_used = _time.monotonic()
+            except Exception:
+                # A mid-pipeline failure can leave unconsumed frames on the wire;
+                # drop the socket so the next use reconnects cleanly.
+                await self.close()
+                raise
 
     async def close(self):
         if self._ws and not self._ws.closed:
@@ -286,8 +334,10 @@ async def connect_peer(address: str) -> tuple[dict | None, str | None]:
                 if not details.get("ok", True):
                     reason = details.get("reason", "Connection rejected")
                     if reason == "Pending approval":
-                        # Store the peer so it appears in the list with awaiting status
-                        peer = await db.peer_upsert(peer_address or address, peer_name, fp)
+                        # Store the peer so it appears in the list with awaiting status.
+                        # The rejection response carries no name/address/fingerprint,
+                        # so use the address we dialled and leave the rest unset.
+                        peer = await db.peer_upsert(address, details.get("name"), None)
                         sess = _session(peer)
                         sess._awaiting    = True
                         sess._failed      = False
@@ -314,6 +364,14 @@ async def connect_peer(address: str) -> tuple[dict | None, str | None]:
 
                 peer = await db.peer_upsert(peer_address, peer_name, fp)
                 await db.peer_update_last_seen(peer_address)
+
+                # Store the shared secret the peer issued us (only sent once, on
+                # first approved handshake). We present it on every later request.
+                token = details.get("auth_token")
+                if token:
+                    await db.peer_set_auth_token(peer["id"], token)
+                    peer = await db.peer_by_address(peer_address)
+
                 return peer, None
 
     except asyncio.TimeoutError:
@@ -328,8 +386,10 @@ async def connect_peer(address: str) -> tuple[dict | None, str | None]:
 
 async def get_peer_users(peer: dict) -> list[dict]:
     """Fetch public user list from a peer for member management."""
+    our_address = await db.setting_get("peer_address") or _detect_outbound_address()
     try:
-        resp     = await _session(peer).request({"type": "read_users"}, timeout=5)
+        resp     = await _session(peer).request(
+            {"type": "read_users", "from": our_address}, timeout=5)
         users    = resp.get("users", [])
         base_url = peer["address"].replace("wss://", "https://").replace("ws://", "http://")
         for u in users:
@@ -366,10 +426,12 @@ async def get_peer_stream_messages(peer: dict, max_channels: int = 5, limit_per_
     our_address = await db.setting_get("peer_address") or _detect_outbound_address()
     base_url    = peer["address"].replace("wss://", "https://").replace("ws://", "http://")
 
+    sess = _session(peer)
     try:
-        async with _session(peer).pipeline() as ws:
+        async with sess.pipeline() as ws:
+            tok = sess.peer.get("auth_token")   # refreshed by pipeline()'s token handshake
             # Read channels
-            await ws.send_str(_dumps({"type": "read_channels", "from": our_address}))
+            await ws.send_str(_dumps({"type": "read_channels", "from": our_address, "auth_token": tok}))
             channels_resp = json.loads(await asyncio.wait_for(ws.receive_str(), timeout=5))
             channels      = channels_resp.get("channels", [])
 
@@ -389,9 +451,9 @@ async def get_peer_stream_messages(peer: dict, max_channels: int = 5, limit_per_
             channels = [c for c in channels if _ch_visible(c)][:max_channels]
 
             # Pipeline: subscribe_stream + all read_channel in one RTT
-            await ws.send_str(_dumps({"type": "subscribe_stream", "from": our_address}))
+            await ws.send_str(_dumps({"type": "subscribe_stream", "from": our_address, "auth_token": tok}))
             for ch in channels:
-                req = {"type": "read_channel", "channel_id": ch["id"], "from": our_address}
+                req = {"type": "read_channel", "channel_id": ch["id"], "from": our_address, "auth_token": tok}
                 if channel_cursors:
                     ch_key = f"{ch['id']}|{str(peer['id'])}"
                     if ch_key in channel_cursors:
@@ -433,19 +495,22 @@ async def get_remote_messages(peer: dict, channel_id: uuid.UUID, requesting_user
     """Ask a peer for the message index of a channel, then subscribe for live updates."""
     our_address = await db.setting_get("peer_address") or _detect_outbound_address()
     base_url    = peer["address"].replace("wss://", "https://").replace("ws://", "http://")
+    sess = _session(peer)
     try:
-        async with _session(peer).pipeline() as ws:
+        async with sess.pipeline() as ws:
+            tok = sess.peer.get("auth_token")   # refreshed by pipeline()'s token handshake
             await ws.send_str(_dumps({
                 "type": "read_channel", "channel_id": channel_id, "from": our_address,
-                "user_id": str(requesting_user_id),
+                "user_id": str(requesting_user_id), "auth_token": tok,
             }))
             resp = json.loads(await asyncio.wait_for(ws.receive_str(), timeout=15))
             if not resp.get("ok"):
                 log.warning("read_channel rejected by %s: %s", peer["address"], resp.get("reason"))
-                return []
+                return None, []
 
             await ws.send_str(_dumps({
                 "type": "subscribe", "channel_id": channel_id, "from": our_address,
+                "auth_token": tok,
             }))
             await asyncio.wait_for(ws.receive_str(), timeout=5)
 
@@ -591,12 +656,31 @@ async def get_peer_user_messages(peer: dict, user_id: uuid.UUID) -> list[dict]:
 
 async def fetch_message_content(peer: dict, msg_id: uuid.UUID) -> dict | None:
     """Fetch the actual text/image of a remote message."""
+    our_address = await db.setting_get("peer_address") or _detect_outbound_address()
     try:
-        resp = await _session(peer).request({"type": "get_message", "id": msg_id}, timeout=10)
+        resp = await _session(peer).request(
+            {"type": "get_message", "id": msg_id, "from": our_address}, timeout=10)
         return resp.get("message") if resp.get("ok") else None
     except Exception as e:
         log.warning("Failed to fetch message %s from %s: %s", msg_id, peer["address"], e)
         return None
+
+
+async def _authed_peer(data: dict) -> dict | None:
+    """Return the approved peer record iff the request carries that peer's valid
+    shared secret. The token is matched against the peer identified by its stored
+    address — so a spoofed `from`/`sender_address` without the secret is rejected."""
+    from_address = data.get("from") or data.get("from_address") or data.get("sender_address") or ""
+    token        = data.get("auth_token") or ""
+    if not from_address or not token:
+        return None
+    peer = await db.peer_by_address(from_address)
+    if not peer or peer.get("status", "approved") != "approved":
+        return None
+    stored = peer.get("auth_token")
+    if not stored or not secrets.compare_digest(str(stored), str(token)):
+        return None
+    return peer
 
 
 # ---------------------------------------------------------------------------
@@ -657,13 +741,25 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
                 name    = await db.setting_get("peer_name") or ""
                 address = await db.setting_get("peer_address") or _detect_outbound_address()
-                await ws.send_str(_dumps(_ok("peer_details", name=name, address=address)))
+                resp    = _ok("peer_details", name=name, address=address)
+
+                # Issue a shared secret the first time an approved peer connects.
+                # Only ever returned once (when auth_token is still NULL); later
+                # handshakes never re-send it, so it can't be fished out by an
+                # impersonator claiming an established peer's address.
+                if peer_address:
+                    rec = await db.peer_by_address(peer_address)
+                    if rec and rec.get("status", "approved") == "approved" and not rec.get("auth_token"):
+                        token = secrets.token_urlsafe(32)
+                        await db.peer_set_auth_token(rec["id"], token)
+                        resp["auth_token"] = token
+
+                await ws.send_str(_dumps(resp))
 
             # --- read_channels: return channels visible to the requesting peer ---
             elif msg_type == "read_channels":
-                from_address = data.get("from", "")
                 req_user_id  = _str_uuid(data.get("user_id"))
-                peer_record  = await db.peer_by_address(from_address) if from_address else None
+                peer_record  = await _authed_peer(data)   # None = unauthenticated → public only
                 if peer_record and req_user_id:
                     channels = await db.channels_visible_to_remote_user(req_user_id, peer_record["id"])
                 elif peer_record:
@@ -685,19 +781,22 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             # --- read_user_messages: return recent messages by a local user ---
             elif msg_type == "read_user_messages":
-                uid          = _str_uuid(data.get("user_id"))
-                from_address = data.get("from", "")
-                peer_record  = await db.peer_by_address(from_address) if from_address else None
+                uid         = _str_uuid(data.get("user_id"))
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("read_user_messages", "Not authorised")))
+                    continue
                 if not uid:
                     await ws.send_str(_dumps(_err("read_user_messages", "Missing user_id")))
                     continue
-                msgs = await db.messages_by_user_for_peer(
-                    uid, peer_record["id"] if peer_record else None
-                )
+                msgs = await db.messages_by_user_for_peer(uid, peer_record["id"])
                 await ws.send_str(_dumps(_ok("read_user_messages", messages=msgs)))
 
             # --- read_users: return public user list for member management ---
             elif msg_type == "read_users":
+                if not await _authed_peer(data):
+                    await ws.send_str(_dumps(_err("read_users", "Not authorised")))
+                    continue
                 users = await db.users_all()
                 await ws.send_str(_dumps(_ok("read_users", users=users)))
 
@@ -714,9 +813,8 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     continue
 
                 if not channel["public"]:
-                    from_address = data.get("from", "")
                     req_uid      = _str_uuid(data.get("user_id"))
-                    peer_record  = await db.peer_by_address(from_address) if from_address else None
+                    peer_record  = await _authed_peer(data)
                     authorised   = False
                     if peer_record and req_uid:
                         authorised = await db.is_remote_member(cid, req_uid, peer_record["id"])
@@ -748,58 +846,80 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             # --- get_message: return content of a single message ---
             elif msg_type == "get_message":
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("get_message", "Not authorised")))
+                    continue
                 mid = _str_uuid(data.get("id"))
                 if not mid:
                     await ws.send_str(_dumps(_err("get_message", "Missing id")))
                     continue
 
-                # First check message_content directly — covers messages we sent
-                # to remote channels (no local message_index entry for those).
+                # Case A — message in a channel WE host (has a local index): enforce
+                # channel access. Only our own-origin content is served (received
+                # content is never cached, so sender_peer_id must be NULL).
+                index = await db.message_by_id(mid)
+                if index is not None:
+                    if index.get("sender_peer_id") is not None:
+                        await ws.send_str(_dumps(_err("get_message", "Not found")))
+                        continue
+                    channel = await db.channel_by_id(index["channel_id"])
+                    if channel and not channel["public"]:
+                        if not await db.peer_has_member_in_channel(channel["id"], peer_record["id"]):
+                            await ws.send_str(_dumps(_err("get_message", "Not authorised")))
+                            continue
+                    content = await db.message_content_local(mid)
+                    await ws.send_str(_dumps(_ok("get_message", message=content or index)))
+                    continue
+
+                # Case B — content we sent to a REMOTE channel (no local index). The
+                # message UUID only ever reaches that channel's members, and we host
+                # no metadata to check it against, so serve to the authenticated peer.
                 content = await db.message_content_local(mid)
                 if content is not None:
                     await ws.send_str(_dumps(_ok("get_message", message=content)))
                     continue
 
-                # Fall back to full message lookup for local channel messages
-                message = await db.message_by_id(mid)
-                if not message or message.get("sender_peer_id") is not None:
-                    await ws.send_str(_dumps(_err("get_message", "Not found")))
-                    continue
-
-                await ws.send_str(_dumps(_ok("get_message", message=message)))
+                await ws.send_str(_dumps(_err("get_message", "Not found")))
 
             # --- subscribe: peer wants live notifications for a channel ---
             elif msg_type == "subscribe":
                 cid          = _str_uuid(data.get("channel_id"))
-                from_address = data.get("from", "")
-                if not cid or not from_address:
-                    await ws.send_str(_dumps(_err("subscribe", "Missing channel_id or from")))
+                peer_record  = await _authed_peer(data)
+                if not cid or not peer_record:
+                    await ws.send_str(_dumps(_err("subscribe", "Not authorised")))
                     continue
 
                 channel = await db.channel_by_id(cid)
                 if channel and not channel["public"]:
-                    peer_record = await db.peer_by_address(from_address)
-                    if not peer_record or not await db.peer_has_member_in_channel(cid, peer_record["id"]):
+                    if not await db.peer_has_member_in_channel(cid, peer_record["id"]):
                         await ws.send_str(_dumps(_err("subscribe", "Not authorised")))
                         continue
 
-                peer_address = from_address
-                _add_peer_subscription(cid, from_address)
+                peer_address = peer_record["address"]
+                _add_peer_subscription(cid, peer_address)
                 await ws.send_str(_dumps(_ok("subscribe", channel_id=cid)))
 
             # --- subscribe_stream: peer wants all future messages pushed ---
             elif msg_type == "subscribe_stream":
-                from_address = data.get("from", "")
-                if from_address:
-                    _stream_subscriptions.add(from_address)
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("subscribe_stream", "Not authorised")))
+                    continue
+                _stream_subscriptions.add(peer_record["address"])
                 await ws.send_str(_dumps(_ok("subscribe_stream")))
 
             # --- new_message: a peer is telling us about a new message ---
             elif msg_type == "new_message":
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("new_message", "Not authorised")))
+                    continue
+                sender_address = peer_record["address"]
+
                 mid            = _str_uuid(data.get("message_id"))
                 cid            = _str_uuid(data.get("channel_id"))
                 sender_user_id = _str_uuid(data.get("sender_user_id"))
-                sender_address = data.get("sender_address", "")
                 created_raw    = data.get("created")
 
                 if not all([mid, cid, sender_user_id]):
@@ -821,16 +941,7 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
                 if channel:
                     # Channel is hosted here — store the message index with access checks
-                    peer_record = None
-                    if sender_address:
-                        peer_record = await db.peer_by_address(sender_address)
-                        if not peer_record:
-                            if not channel["public"]:
-                                await ws.send_str(_dumps(_err("new_message", "Not authorised")))
-                                continue
-                            peer_record = await db.peer_upsert(sender_address, None, None)
-
-                    peer_id_val = peer_record["id"] if peer_record else None
+                    peer_id_val = peer_record["id"]
 
                     if not channel["public"]:
                         if not peer_id_val or not await db.is_remote_member(cid, sender_user_id, peer_id_val):
@@ -853,14 +964,13 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     # is offline the viewer sees "unavailable".
                 else:
                     # Channel lives on another server — we're just a subscriber relay
-                    peer_record  = await db.peer_by_address(sender_address) if sender_address else None
-                    peer_id_val  = peer_record["id"] if peer_record else None
+                    peer_id_val = peer_record["id"]
 
                 await ws.send_str(_dumps(_ok("new_message", message_id=mid)))
 
                 # Push to any local clients watching this channel
                 from handlers.ws import broadcast_to_channel, push_to_stream
-                peer_name_val = (peer_record.get("name") or sender_address) if peer_record else sender_address
+                peer_name_val = peer_record.get("name") or sender_address
                 bcast_msg = {
                     "id":              str(mid),
                     "channel_id":      str(cid),

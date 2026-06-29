@@ -1,0 +1,61 @@
+{% extends "wiki/_base.html" %}
+{% set active = "security" %}
+{% block title %}Security model{% endblock %}
+
+{% block content %}
+<h1>Security model</h1>
+<p class="wiki-lead">A technical overview of how Messages establishes trust, authenticates peers, and protects data in transit.</p>
+
+<nav class="wiki-toc">
+    <a href="#transport">Transport encryption</a>
+    <a href="#tofu">TOFU cert pinning</a>
+    <a href="#succession">Certificate rotation</a>
+    <a href="#peer-auth">Peer authentication</a>
+    <a href="#user-auth">User authentication</a>
+    <a href="#access">Access control</a>
+</nav>
+
+<hr>
+
+<h2 id="transport">Transport encryption</h2>
+<p>All traffic — browser to server, and server to server — runs over TLS. There are no plaintext connections anywhere in the stack. The WebSocket protocol used for federation (<code>wss://</code>) and the browser interface (<code>https://</code>) both require TLS.</p>
+
+<hr>
+
+<h2 id="tofu">TOFU certificate pinning</h2>
+<p><strong>Trust On First Use (TOFU)</strong> is the same model SSH uses for host keys. When two servers connect for the first time, the connecting server records the SHA-256 fingerprint of the remote server's TLS certificate. On every subsequent connection, the fingerprint is checked against the stored value.</p>
+<p>If the fingerprint changes unexpectedly — without a valid succession record (see below) — the connection is refused and an error is logged. This prevents a third party from intercepting the connection by presenting a different certificate.</p>
+<p>TOFU deliberately trades a first-connection leap of faith for strong protection on all future connections. If you need stronger first-connection guarantees, verify the fingerprint out-of-band with the peer's admin.</p>
+
+<hr>
+
+<h2 id="succession">Certificate rotation</h2>
+<p>When a server renews its certificate — whether self-signed via the UI or via Let's Encrypt — it creates a <strong>succession record</strong>: a signed statement using the <em>old</em> private key that vouches for the <em>new</em> certificate's fingerprint.</p>
+<p>The record is published at <code>/succession</code>. When a peer reconnects and finds a changed fingerprint, it fetches the succession chain and verifies each step cryptographically. If the chain is valid, the new fingerprint is accepted and stored. If not, the connection is refused.</p>
+<p>This allows certificate rotation without manual intervention on peer servers, even if the peer was offline during the rotation.</p>
+
+<hr>
+
+<h2 id="peer-auth">Peer authentication</h2>
+<p>After the initial handshake, each server issues the connecting peer a <strong>shared secret token</strong>. This token must accompany every subsequent federation request. Tokens are stored in the database and checked with constant-time comparison to prevent timing attacks.</p>
+<p>This means a server that knows another server's address cannot impersonate it — it also needs the token that was issued during the approved handshake. Spoofing the <code>from</code> field in a message is rejected at every privileged endpoint.</p>
+
+<hr>
+
+<h2 id="user-auth">User authentication</h2>
+<p>Passwords are hashed with <strong>Argon2id</strong>, the winner of the Password Hashing Competition and the current recommended standard. Parameters are automatically upgraded if the hashing cost settings improve in a future release — existing passwords are transparently rehashed on next login.</p>
+<p>Sessions use a 48-byte cryptographically random token stored in a <code>Secure; HttpOnly; SameSite=Strict</code> cookie. Session duration is configurable; expired sessions are purged periodically.</p>
+<p>Login and registration endpoints are rate-limited per IP. When running behind a trusted reverse proxy, the real client IP is read from <code>X-Forwarded-For</code> — only from proxy IPs explicitly listed in <em>Advanced → Trusted proxies</em>.</p>
+
+<hr>
+
+<h2 id="access">Access control</h2>
+<p>Access checks are enforced at every layer:</p>
+<ul>
+    <li><strong>Private channels</strong> — federation endpoints verify that the requesting peer has at least one member in the channel, and individual message fetches additionally verify per-user membership.</li>
+    <li><strong>Message content</strong> — the <code>get_message</code> endpoint only serves content from channels the requesting peer can access. It never serves content received <em>from</em> another peer (only content this server originated).</li>
+    <li><strong>Image proxy</strong> — the <code>/proxy_img</code> endpoint only fetches from known peer addresses, preventing server-side request forgery against internal services.</li>
+    <li><strong>Owner-only settings</strong> — server configuration endpoints verify the session belongs to the designated owner account before accepting changes.</li>
+</ul>
+
+{% endblock %}

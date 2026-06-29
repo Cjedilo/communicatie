@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS peers (
     ssl_fingerprint TEXT,
     status          TEXT    NOT NULL DEFAULT 'approved',
     last_seen       TEXT,
+    auth_token      TEXT,
     created         TEXT    DEFAULT (datetime('now'))
 );
 

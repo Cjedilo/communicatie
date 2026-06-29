@@ -1,0 +1,47 @@
+{% extends "wiki/_base.html" %}
+{% set active = "users-page" %}
+{% block title %}Users{% endblock %}
+
+{% block content %}
+<h1>Users</h1>
+<p class="wiki-lead">The Users page shows everyone you can interact with — people on your own server and on connected servers.</p>
+
+<nav class="wiki-toc">
+    <a href="#browsing">Browsing users</a>
+    <a href="#conversations">Starting a conversation</a>
+    <a href="#profile">Viewing a profile</a>
+    <a href="#blocking">Blocking someone</a>
+    <a href="#admin">Admin actions</a>
+</nav>
+
+<hr>
+
+<h2 id="browsing">Browsing users</h2>
+<p>Local users appear at the top. Remote users are grouped by their home server and collapsed by default — click a server name to expand the list. Use the filter bar to search across everyone at once.</p>
+
+<hr>
+
+<h2 id="conversations">Starting a conversation</h2>
+<p>Next to each user you'll find action buttons:</p>
+<ul>
+    <li><strong>💬</strong> — opens a direct message channel between you and that person. It's a private channel: only the two of you can see it.</li>
+    <li><strong>🗒</strong> (next to your own name) — opens your <strong>Scratchpad</strong>, a private channel with yourself. Useful for notes, links, or anything you want to keep handy.</li>
+</ul>
+
+<hr>
+
+<h2 id="profile">Viewing a profile</h2>
+<p>Click on a user's name or avatar to open their profile. You'll see their display name, avatar, when they joined, and their recent messages. Clicking a message takes you straight to that channel.</p>
+
+<hr>
+
+<h2 id="blocking">Blocking someone</h2>
+<p>Next to each user is a 🔕 button. Click it to block that person — their messages will no longer appear in your stream or any channel. The button turns 🚫 when they're blocked. Click again to unblock.</p>
+<p>You can also block from someone's profile page.</p>
+
+<hr>
+
+<h2 id="admin">Admin actions</h2>
+<p>If you're the server owner, you'll also see a ✕ button next to local users. This permanently deletes their account and all their messages.</p>
+
+{% endblock %}

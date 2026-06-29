@@ -24,10 +24,12 @@ CREATE TABLE IF NOT EXISTS peers (
     ssl_fingerprint TEXT,                       -- SHA-256 of their cert, pinned on first connect
     status          TEXT    NOT NULL DEFAULT 'approved',  -- approved/pending/blocked
     last_seen       TIMESTAMPTZ,
+    auth_token      TEXT,                       -- shared secret this peer must present on requests
     created         TIMESTAMPTZ DEFAULT NOW()
 );
-ALTER TABLE peers ADD COLUMN IF NOT EXISTS status    TEXT        NOT NULL DEFAULT 'approved';
-ALTER TABLE peers ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
+ALTER TABLE peers ADD COLUMN IF NOT EXISTS status     TEXT        NOT NULL DEFAULT 'approved';
+ALTER TABLE peers ADD COLUMN IF NOT EXISTS last_seen  TIMESTAMPTZ;
+ALTER TABLE peers ADD COLUMN IF NOT EXISTS auth_token TEXT;
 
 -- Channels are owned by this server
 CREATE TABLE IF NOT EXISTS channels (

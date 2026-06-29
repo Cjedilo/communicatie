@@ -59,7 +59,10 @@ body {
     align-items: center;
     justify-content: center;
     margin-bottom: .5rem;
+    text-decoration: none;
+    border-radius: var(--radius);
 }
+.nav-logo:hover { background: var(--bg3); }
 
 #sidenav .nav-item {
     width: 44px;
@@ -154,6 +157,9 @@ body {
     padding: 1rem 1.25rem .5rem;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: .75rem;
 }
 
 .page-header h2 {
@@ -742,6 +748,14 @@ textarea#message_input:focus { outline: 2px solid var(--accent); }
     color: var(--accent);
 }
 
+.login-wiki-link {
+    font-size: .85rem;
+    color: var(--text-dim);
+    text-decoration: none;
+    margin-top: -.75rem;
+}
+.login-wiki-link:hover { color: var(--accent); }
+
 .login-card {
     background: var(--bg2);
     border: 1px solid var(--border);
@@ -768,6 +782,8 @@ form {
 
 input[type="text"],
 input[type="password"],
+input[type="number"],
+input[type="search"],
 textarea {
     background: var(--bg2);
     border: 1px solid var(--border);
@@ -836,8 +852,8 @@ button.secondary { background: var(--bg3); }
 .user-msg-text  { font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .users-table {
-    width: 100%;
     border-collapse: collapse;
+    width: max-content;
 }
 .users-table td { padding: .25rem .3rem; vertical-align: middle; }
 .users-table tr:hover td { background: var(--bg3); border-radius: var(--radius); }

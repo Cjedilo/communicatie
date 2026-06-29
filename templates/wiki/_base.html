@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Messages{% endblock %} — Messages</title>
+    <link rel="stylesheet" href="{{ base_path }}/communicatie.css?v=50">
+    <link rel="stylesheet" href="{{ base_path }}/wiki.css?v=1">
+</head>
+<body class="wiki-body">
+
+<div class="wiki-layout">
+
+    <nav class="wiki-sidebar">
+        <a class="wiki-home-link" href="{{ base_path }}/wiki/">
+            <div class="nav-logo">C</div>
+            <span>Messages</span>
+        </a>
+
+        <div class="wiki-nav-group">
+            <a href="{{ base_path }}/wiki/" class="wiki-nav-item{% if active == 'home' %} active{% endif %}">Overview</a>
+        </div>
+
+        <div class="wiki-nav-group">
+            <div class="wiki-nav-label">Features</div>
+            <a href="{{ base_path }}/wiki/getting-started" class="wiki-nav-item{% if active == 'getting-started' %} active{% endif %}">Getting started</a>
+            <a href="{{ base_path }}/wiki/channels" class="wiki-nav-item{% if active == 'channels' %} active{% endif %}">Channels</a>
+            <a href="{{ base_path }}/wiki/users" class="wiki-nav-item{% if active == 'users-page' %} active{% endif %}">Users</a>
+            <a href="{{ base_path }}/wiki/peers" class="wiki-nav-item{% if active == 'peers' %} active{% endif %}">Peers &amp; federation</a>
+            <a href="{{ base_path }}/wiki/server" class="wiki-nav-item{% if active == 'server' %} active{% endif %}">Server management</a>
+        </div>
+
+        <div class="wiki-nav-group">
+            <div class="wiki-nav-label">Design</div>
+            <a href="{{ base_path }}/wiki/security" class="wiki-nav-item{% if active == 'security' %} active{% endif %}">Security model</a>
+            <a href="{{ base_path }}/wiki/federation-protocol" class="wiki-nav-item{% if active == 'federation-protocol' %} active{% endif %}">Federation protocol</a>
+            <a href="{{ base_path }}/wiki/privacy" class="wiki-nav-item{% if active == 'privacy' %} active{% endif %}">Privacy &amp; data</a>
+        </div>
+
+        <div class="wiki-nav-group">
+            <a href="{{ base_path }}/" class="wiki-nav-item wiki-nav-back">← Back to app</a>
+        </div>
+    </nav>
+
+    <main class="wiki-main">
+        <article class="wiki-article">
+            {% block content %}{% endblock %}
+        </article>
+    </main>
+
+</div>
+
+</body>
+</html>

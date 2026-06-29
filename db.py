@@ -82,6 +82,9 @@ class _PGBackend:
             await c.execute(
                 "ALTER TABLE channels ADD COLUMN IF NOT EXISTS icon TEXT"
             )
+            await c.execute(
+                "ALTER TABLE peers ADD COLUMN IF NOT EXISTS auth_token TEXT"
+            )
 
     async def close(self):
         if self._pool:
@@ -131,6 +134,7 @@ class _SQLiteBackend:
         for col_sql in [
             "ALTER TABLE peers ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'",
             "ALTER TABLE peers ADD COLUMN last_seen TEXT",
+            "ALTER TABLE peers ADD COLUMN auth_token TEXT",
             "ALTER TABLE users ADD COLUMN display_name TEXT",
             "ALTER TABLE channels ADD COLUMN icon TEXT",
         ]:
@@ -693,9 +697,12 @@ async def channel_bans_for(channel_id: uuid.UUID) -> list[dict]:
 
 
 async def is_banned(channel_id: uuid.UUID, user_id: uuid.UUID, peer_id: uuid.UUID | None = None) -> bool:
+    # Match the ban to the exact identity: a local user (peer_id IS NULL) and a
+    # remote user with the same user_id from some peer are distinct principals.
     r = await _db.fetchrow(
-        "SELECT 1 FROM channel_bans WHERE channel_id=$1 AND user_id=$2",
-        channel_id, user_id,
+        "SELECT 1 FROM channel_bans WHERE channel_id=$1 AND user_id=$2 "
+        "AND (peer_id = $3 OR (peer_id IS NULL AND $3 IS NULL))",
+        channel_id, user_id, peer_id,
     )
     return r is not None
 
@@ -909,6 +916,11 @@ async def peer_upsert(address: str, name: str | None, fingerprint: str | None) -
 
 async def peer_set_status(peer_id: uuid.UUID, status: str):
     await _db.execute("UPDATE peers SET status=$2 WHERE id=$1", peer_id, status)
+
+
+async def peer_set_auth_token(peer_id: uuid.UUID, token: str | None):
+    """Set the shared secret used to authenticate this peer's federation requests."""
+    await _db.execute("UPDATE peers SET auth_token=$2 WHERE id=$1", peer_id, token)
 
 
 async def peer_update_last_seen(address: str):

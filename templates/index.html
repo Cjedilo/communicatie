@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Messages</title>
-    <link rel="stylesheet" href="{{ base_path }}/communicatie.css?v=49">
+    <link rel="stylesheet" href="{{ base_path }}/communicatie.css?v=50">
 </head>
 <body>
 
@@ -13,7 +13,7 @@
 
     <!-- Desktop sidebar nav -->
     <nav id="sidenav">
-        <div class="nav-logo">C</div>
+        <a class="nav-logo" href="{{ base_path }}/wiki/" title="About Messages" target="_blank">C</a>
         <a class="nav-item" data-page="stream"   title="Stream">🌊</a>
         <a class="nav-item" data-page="channels" title="Channels">💬</a>
         <a class="nav-item" data-page="peers"    title="Peers">🔗</a>
@@ -49,7 +49,7 @@
 <div id="error" class="hidden"></div>
 
 <script>var _base_path = "{{ base_path }}";</script>
-<script src="{{ base_path }}/communicatie.js?v=49"></script>
+<script src="{{ base_path }}/communicatie.js?v=50"></script>
 <script>
     communicatie.init(
         {{ 'true' if logged_in else 'false' }},

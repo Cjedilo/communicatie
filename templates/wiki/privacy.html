@@ -1,0 +1,67 @@
+{% extends "wiki/_base.html" %}
+{% set active = "privacy" %}
+{% block title %}Privacy & data{% endblock %}
+
+{% block content %}
+<h1>Privacy &amp; data</h1>
+<p class="wiki-lead">What Messages stores, where it stores it, and what connected servers can and can't see.</p>
+
+<nav class="wiki-toc">
+    <a href="#your-server">Your server</a>
+    <a href="#peers">What peers see</a>
+    <a href="#content">Content ownership</a>
+    <a href="#images">Images</a>
+    <a href="#metadata">Metadata</a>
+</nav>
+
+<hr>
+
+<h2 id="your-server">Your server</h2>
+<p>Your server stores:</p>
+<ul>
+    <li>User accounts (username, hashed password, display name, avatar)</li>
+    <li>Channel definitions and membership lists</li>
+    <li>Messages sent by users on this server — text and images</li>
+    <li>Message index entries for messages received from peers (metadata only — no content)</li>
+    <li>Peer connection records (address, name, certificate fingerprint, auth token)</li>
+    <li>User settings (stream preferences, blocked users)</li>
+</ul>
+<p>Nothing else. There is no analytics, no telemetry, no external reporting of any kind. The software does not phone home.</p>
+
+<hr>
+
+<h2 id="peers">What peers see</h2>
+<p>A connected peer server can:</p>
+<ul>
+    <li>Read and post in your <strong>public channels</strong></li>
+    <li>Read and post in <strong>private channels</strong> where one of their users has been explicitly added as a member</li>
+    <li>See your public user list (names and avatars)</li>
+    <li>Fetch content for messages they have legitimate access to</li>
+</ul>
+<p>A connected peer cannot:</p>
+<ul>
+    <li>Read private channels they have no members in</li>
+    <li>Read direct messages between users on your server</li>
+    <li>Access any content without presenting a valid auth token issued during the approved handshake</li>
+</ul>
+
+<hr>
+
+<h2 id="content">Content ownership</h2>
+<p>When someone on a peer reads a message you sent, their server fetches the content from yours at that moment. <strong>Nothing is cached on their side.</strong></p>
+<p>This means you retain control. If you block a peer, they immediately lose access to your content — both future messages and on-demand fetches of old ones. If your server goes offline, your messages become temporarily unavailable to peers. This is intentional: the writer owns the content.</p>
+<p>It also means deletion is real. Remove a message or an image from your server and it's gone — not just hidden, not archived somewhere else. Anyone who already has it on screen may still see it until they navigate away, but the next time anyone tries to fetch it, it simply isn't there.</p>
+
+<hr>
+
+<h2 id="images">Images</h2>
+<p>Images you upload are stored on your server's filesystem, in the directory configured under <em>Server → Image storage</em>. Peers fetch images through a proxy on their own server — your images are never stored on their disk.</p>
+<p>If you delete an image file from the filesystem, it becomes unavailable everywhere — including to users on your own server.</p>
+
+<hr>
+
+<h2 id="metadata">Metadata</h2>
+<p>One nuance: when a message is sent to a channel hosted on another server, that server stores a <strong>message index entry</strong> — enough to know a message exists (sender, timestamp, channel) without the content itself. This metadata persists on the host server even if the originating server goes offline or the peer relationship ends.</p>
+<p>This is necessary for the host server to maintain a coherent message timeline. It mirrors how email works — the receiving server records that a message arrived, even if the original sender's server later disappears.</p>
+
+{% endblock %}

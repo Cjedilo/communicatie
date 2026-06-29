@@ -1,0 +1,63 @@
+{% extends "wiki/_base.html" %}
+{% set active = "home" %}
+{% block title %}Overview{% endblock %}
+
+{% block content %}
+<h1>Your data. Your server. Your people.</h1>
+
+<p class="wiki-lead">For years, staying in touch meant handing your data to someone else.</p>
+
+<p>Facebook, LinkedIn, WhatsApp — they store your messages, mine your social graph, and decide what you see. You don't own any of it. The day they change their terms, raise their prices, or shut down, your connections go with them.</p>
+
+<p>It doesn't have to work that way.</p>
+
+<hr>
+
+<h2>This is a self-hosted chat app built around one idea: you run the server, you keep your data.</h2>
+
+<p>You talk to friends, family, or colleagues on <em>their</em> servers — just like email, where Gmail users can write to Outlook users without either switching providers. Nobody in the middle reads your messages.</p>
+
+<p>And you don't have to run a server yourself. If you trust someone who does — a friend, a family member, that one nerdy cousin who loves this stuff — you can use theirs. You're always in control of who you connect with and what you share.</p>
+
+<hr>
+
+<h2>This is possible now</h2>
+
+<p>A server that can run Messages for your household or small community costs as little as $50 — a Raspberry Pi or any low-powered mini PC. Left running around the clock, it draws roughly 5 watts: about <strong>€1 a month in electricity</strong>. Fiber internet, now common in most homes, gives you the speed and reliability to serve dozens of people without breaking a sweat.</p>
+
+<p>The software is designed to take care of itself. Settings work out of the box, and updates install automatically. Getting started takes an afternoon — and most of that is waiting for downloads.</p>
+
+<p class="wiki-aside">Not sure about port forwarding or router setup? We have a <a href="{{ base_path }}/wiki/getting-started">guide for that</a>.</p>
+
+<hr>
+
+<h2>What you get</h2>
+
+<ul class="wiki-features">
+    <li>
+        <strong>Channels</strong>
+        Public or private group conversations, visible across federated servers.
+    </li>
+    <li>
+        <strong>Direct messages</strong>
+        One-on-one, stored only on your server.
+    </li>
+    <li>
+        <strong>Federation</strong>
+        Connect to friends on other Messages servers and talk across servers, just like email.
+    </li>
+    <li>
+        <strong>Your images and messages stay yours</strong>
+        Everything you send lives on your server, not theirs.
+    </li>
+    <li>
+        <strong>Open source</strong>
+        Read the code, run it, modify it.
+    </li>
+</ul>
+
+<div class="wiki-cta">
+    <a href="{{ base_path }}/wiki/getting-started" class="wiki-btn">Get started →</a>
+    <a href="{{ base_path }}/wiki/security" class="wiki-btn wiki-btn-secondary">How it works</a>
+</div>
+{% endblock %}

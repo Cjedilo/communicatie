@@ -1,0 +1,93 @@
+{% extends "wiki/_base.html" %}
+{% set active = "server" %}
+{% block title %}Server management{% endblock %}
+
+{% block content %}
+<h1>Server management</h1>
+<p class="wiki-lead">Everything in ⚙️ Server is only visible to the server owner. This is where you configure how your server presents itself, stores data, and handles connections.</p>
+
+<nav class="wiki-toc">
+    <a href="#identity">Identity</a>
+    <a href="#images">Image storage</a>
+    <a href="#database">Database</a>
+    <a href="#ssl">SSL certificate</a>
+    <a href="#peers">Peer policy</a>
+    <a href="#peers">Peer policy</a>
+    <a href="#connecting">Connecting to a peer</a>
+    <a href="#advanced">Advanced settings</a>
+</nav>
+
+<hr>
+
+<h2 id="identity">Identity</h2>
+<p>Your server has two identifying properties:</p>
+<ul>
+    <li><strong>Name</strong> — how your server appears to peers and in the users list. Pick something recognisable.</li>
+    <li><strong>Address</strong> — the full <code>wss://</code> address other servers use to connect to you, e.g. <code>wss://myhome.example.com/chat</code>. This is what you share with other server admins when setting up federation. Regular users use the <code>https://</code> version of the same address.</li>
+</ul>
+<p class="wiki-aside">Changing the address affects federation — existing peers will need to reconnect at the new address. The base path (e.g. <code>/chat</code>) is derived automatically from whatever path you put in the address.</p>
+
+<hr>
+
+<h2 id="images">Image storage</h2>
+<p>Uploaded images — avatars and photos sent in channels — are stored in a directory on the server's filesystem. The current directory and available disk space are shown here.</p>
+<p>You can change the directory at any time. When you do, you'll be offered three options:</p>
+<ul>
+    <li><strong>Keep files in place</strong> — the old files stay where they are; new uploads go to the new path. Old images may become unreachable.</li>
+    <li><strong>Copy to new location</strong> — all existing files are copied. Both locations keep their files.</li>
+    <li><strong>Move to new location</strong> — all existing files are moved. Frees up space at the old path.</li>
+</ul>
+
+<hr>
+
+<h2 id="database">Database</h2>
+<p>Messages supports two database backends:</p>
+<ul>
+    <li><strong>SQLite</strong> — stores everything in a single file. Simple to set up, easy to back up, fine for most deployments.</li>
+    <li><strong>PostgreSQL</strong> — better for larger installations with many users or high message volume. Requires a running PostgreSQL server.</li>
+</ul>
+<p class="wiki-aside"><strong>Data is not migrated automatically</strong> when switching backends. Back up first, then switch. A restart is required to apply the change.</p>
+
+<hr>
+
+<h2 id="ssl">SSL certificate</h2>
+<p>All connections to your server are encrypted. By default, Messages generates a <strong>self-signed certificate</strong> — this works immediately but causes a browser warning on first visit. See <a href="{{ base_path }}/wiki/getting-started#as-an-admin">Getting started</a> for why that warning isn't as scary as it looks.</p>
+
+<p>There are three options:</p>
+<ul>
+    <li><strong>Self-signed, auto-generated</strong> — the default. Use <em>Renew</em> to generate a fresh certificate. Existing peers are notified automatically and stay connected.</li>
+    <li><strong>Your own certificate</strong> — enter paths to your <code>.pem</code> files (e.g. from Let's Encrypt). Use <em>Reload</em> after certbot or another tool has renewed the files on disk — no restart needed.</li>
+</ul>
+<p>The expiry date is shown next to the certificate info. A warning badge (!) appears on the Server icon when renewal is overdue.</p>
+
+<hr>
+
+<h2 id="peers">Peer policy</h2>
+<p>The peer policy controls which other servers can connect to yours. Set it under <strong>🔗 Peers</strong>:</p>
+<ul>
+    <li><strong>Open</strong> — any server can connect automatically</li>
+    <li><strong>Approval required</strong> — you review and approve each new server before it can connect</li>
+    <li><strong>Closed</strong> — no new connections are accepted</li>
+</ul>
+<p>Existing approved peers are not affected when you change the policy — only new connection attempts are evaluated against the current setting.</p>
+
+<hr>
+
+<h2 id="connecting">Connecting to a peer</h2>
+<p>Go to <strong>🔗 Peers</strong> and paste the <code>wss://</code> address of another Messages server. Your server connects to theirs, exchanges names and establishes trust, and the connection is live.</p>
+<p>The other server's public channels then appear under <em>Remote channels</em> in the Channels page, and their users appear in the Users page. You can also invite each other's users to private channels.</p>
+<p class="wiki-aside">On first connect, both servers pin each other's certificate fingerprint. If the fingerprint ever changes without a valid succession record, the connection is refused. See <a href="{{ base_path }}/wiki/security">Security model</a> for details.</p>
+
+<hr>
+
+<h2 id="advanced">Advanced settings</h2>
+<p>The <strong>Advanced</strong> link at the top of the Server page gives access to lower-level settings:</p>
+<ul>
+    <li><strong>Network</strong> — bind host and ports (requires restart)</li>
+    <li><strong>Rate limiting</strong> — max login attempts and messages per minute, trusted proxy IPs (applied immediately)</li>
+    <li><strong>Federation</strong> — peer connection timeout (applied immediately)</li>
+    <li><strong>Sessions</strong> — how long login sessions stay valid (requires restart)</li>
+    <li><strong>Uploads</strong> — maximum image upload size (requires restart)</li>
+</ul>
+
+{% endblock %}

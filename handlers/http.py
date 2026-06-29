@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+import secrets
 import uuid
 from pathlib import Path
 
@@ -66,20 +67,28 @@ def _resize_avatar(data: bytes) -> bytes:
 
 def _resize_image(data: bytes) -> bytes:
     img = Image.open(io.BytesIO(data))
-    is_gif = getattr(img, "is_animated", False) or img.format == "GIF"
-    if not is_gif:
-        img = ImageOps.exif_transpose(img)
-        img = _to_rgb(img)
-        if img.width > IMAGE_MAX_PX or img.height > IMAGE_MAX_PX:
-            img.thumbnail((IMAGE_MAX_PX, IMAGE_MAX_PX), Image.LANCZOS)
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=85, optimize=True)
-    else:
-        # Keep GIF as-is, just cap dimensions
+
+    # Animated GIF: re-encoding frame-by-frame is lossy and fiddly (palette,
+    # transparency, per-frame timing, disposal), so keep every frame by
+    # returning the original bytes unchanged. Size is already capped on upload.
+    if getattr(img, "is_animated", False):
+        return data
+
+    if img.format == "GIF":
+        # Static GIF — keep as GIF to preserve transparency, just cap dimensions.
         if img.width > IMAGE_MAX_PX or img.height > IMAGE_MAX_PX:
             img.thumbnail((IMAGE_MAX_PX, IMAGE_MAX_PX), Image.LANCZOS)
         out = io.BytesIO()
         img.save(out, format="GIF")
+        return out.getvalue()
+
+    # Other still images → normalise to JPEG, capped.
+    img = ImageOps.exif_transpose(img)
+    img = _to_rgb(img)
+    if img.width > IMAGE_MAX_PX or img.height > IMAGE_MAX_PX:
+        img.thumbnail((IMAGE_MAX_PX, IMAGE_MAX_PX), Image.LANCZOS)
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=85, optimize=True)
     return out.getvalue()
 
 
@@ -149,6 +158,18 @@ def page(template: str, content_type: str = "text/html"):
     return _handler
 
 
+def wiki_page(slug: str):
+    """Serve a wiki page — no auth required, publicly readable."""
+    template = f"wiki/{slug}.html"
+    async def _handler(request: web.Request) -> web.Response:
+        ctx = {"base_path": config.BASE_PATH}
+        try:
+            return aiohttp_jinja2.render_template(template, request, ctx)
+        except Exception:
+            raise web.HTTPNotFound()
+    return _handler
+
+
 # ---------------------------------------------------------------------------
 # Upload endpoints
 # ---------------------------------------------------------------------------
@@ -186,23 +207,41 @@ async def upload_image(request: web.Request) -> web.Response:
 # Auth endpoints
 # ---------------------------------------------------------------------------
 
-_register_attempts: dict[str, tuple[float, int]] = {}
+def _client_ip(request: web.Request) -> str:
+    """Real client IP for rate limiting. X-Forwarded-For is attacker-controlled
+    unless the direct peer is a trusted reverse proxy; only then do we read the
+    rightmost forwarded entry (the address our proxy actually observed)."""
+    remote = request.remote or ""
+    if remote in config.TRUSTED_PROXIES:
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[-1].strip()
+    return remote
 
 
-def _register_rate_ok(ip: str) -> bool:
+# key -> (window_start_monotonic, count_in_window)
+_auth_attempts: dict[str, tuple[float, int]] = {}
+_AUTH_WINDOW = 60.0
+
+
+def _auth_rate_ok(key: str) -> bool:
     import time
-    now   = time.monotonic()
-    last, count = _register_attempts.get(ip, (now, 0))
-    if now - last > 60:
-        count = 0
+    now = time.monotonic()
+    start, count = _auth_attempts.get(key, (now, 0))
+    if now - start > _AUTH_WINDOW:        # fixed window — reset, don't slide
+        start, count = now, 0
     count += 1
-    _register_attempts[ip] = (now, count)
+    _auth_attempts[key] = (start, count)
+    # Bound memory: evict stale windows once the table grows large.
+    if len(_auth_attempts) > 10000:
+        cutoff = now - _AUTH_WINDOW
+        for k in [k for k, (s, _) in _auth_attempts.items() if s < cutoff]:
+            del _auth_attempts[k]
     return count <= config.RATE_LIMIT_LOGIN
 
 
 async def register(request: web.Request) -> web.Response:
-    ip = request.headers.get("X-Forwarded-For", request.remote)
-    if not _register_rate_ok(ip):
+    if not _auth_rate_ok(_client_ip(request)):
         return web.json_response({"ok": False, "reason": "Too many attempts, try again later"}, status=429)
 
     try:
@@ -230,8 +269,7 @@ async def register(request: web.Request) -> web.Response:
 
 
 async def login(request: web.Request) -> web.Response:
-    ip = request.headers.get("X-Forwarded-For", request.remote)
-    if not _register_rate_ok(ip):
+    if not _auth_rate_ok(_client_ip(request)):
         return web.json_response({"ok": False, "reason": "Too many attempts, try again later"}, status=429)
 
     try:
@@ -259,6 +297,51 @@ async def login(request: web.Request) -> web.Response:
     return response
 
 
+async def setup_claim(request: web.Request) -> web.Response:
+    """One-time owner-claim endpoint. Secret embedded in URL; invalidated after use."""
+    secret = request.match_info.get("secret", "")
+    stored = db_config.setup_secret_get()
+
+    if not stored or not secrets.compare_digest(stored, secret):
+        raise web.HTTPNotFound()
+
+    if await db.setting_get("owner_id"):
+        # Already claimed — secret should be gone, but be safe
+        db_config.setup_secret_clear()
+        raise web.HTTPNotFound()
+
+    if request.method == "GET":
+        ctx = {"base_path": config.BASE_PATH}
+        return aiohttp_jinja2.render_template("setup.html", request, ctx)
+
+    # POST — register the owner account
+    try:
+        data = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest()
+
+    name     = str(data.get("name", "")).strip()[:64]
+    password = str(data.get("password", ""))
+
+    if not name or not password:
+        return web.json_response({"ok": False, "reason": "Name and password required"})
+    if len(password) < 8:
+        return web.json_response({"ok": False, "reason": "Password must be at least 8 characters"})
+    if await db.user_by_name(name):
+        return web.json_response({"ok": False, "reason": "Name already taken"})
+
+    hashed = auth.hash_password(password)
+    user   = await db.user_create(name, hashed)
+    await db.setting_set("owner_id", str(user["id"]))
+
+    db_config.setup_secret_clear()
+
+    token    = await auth.create_session(user["id"])
+    response = web.json_response({"ok": True})
+    auth.set_session_cookie(response, token)
+    return response
+
+
 async def proxy_img(request: web.Request) -> web.Response:
     """Proxy a remote peer's image through the local server to avoid cert trust issues."""
     session = await auth.session_from_request(request)
@@ -268,6 +351,20 @@ async def proxy_img(request: web.Request) -> web.Response:
     url = request.query.get("url", "")
     if not url.startswith("https://") and not url.startswith("http://"):
         raise web.HTTPBadRequest(reason="Invalid URL")
+
+    # SSRF guard: this proxy exists only to fetch images from peers whose
+    # self-signed certs the browser won't trust. Restrict the target host to a
+    # known peer's address — otherwise an authenticated user (or a malicious
+    # peer-supplied avatar URL) could make us fetch internal/metadata endpoints.
+    import urllib.parse
+    target_host = urllib.parse.urlparse(url).netloc.lower()
+    allowed_hosts = {
+        urllib.parse.urlparse(p["address"]).netloc.lower()
+        for p in await db.peers_all()
+    }
+    allowed_hosts.discard("")
+    if target_host not in allowed_hosts:
+        raise web.HTTPForbidden(reason="URL host is not a known peer")
 
     import aiohttp as _aiohttp, ssl as _ssl
     ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
@@ -297,7 +394,7 @@ async def logout(request: web.Request) -> web.Response:
     token = request.cookies.get(config.SESSION_COOKIE)
     if token:
         await auth.delete_session(token)
-    response = web.HTTPFound("/")
+    response = web.HTTPFound((config.BASE_PATH or "") + "/")
     auth.clear_session_cookie(response)
     return response
 
@@ -314,9 +411,21 @@ routes = [
     ("GET",  "/user.html",     page("user.html")),
     ("GET",  "/stream.html",   page("stream.html")),
     ("GET",  "/peers.html",    page("peers.html")),
-    ("GET",  "/server.html",   page("server.html")),
+    ("GET",  "/server.html",    page("server.html")),
+    ("GET",  "/advanced.html", page("advanced.html")),
     ("GET",  "/users.html",    page("users.html")),
-    ("GET",  "/channels.html",  page("channels.html")),
+    ("GET",  "/setup/{secret}",              setup_claim),
+    ("POST", "/setup/{secret}",              setup_claim),
+    ("GET",  "/wiki/",                       wiki_page("home")),
+    ("GET",  "/wiki/getting-started",        wiki_page("getting-started")),
+    ("GET",  "/wiki/channels",               wiki_page("channels")),
+    ("GET",  "/wiki/users",                   wiki_page("users-page")),
+    ("GET",  "/wiki/peers",                  wiki_page("peers")),
+    ("GET",  "/wiki/server",                 wiki_page("server")),
+    ("GET",  "/wiki/security",               wiki_page("security")),
+    ("GET",  "/wiki/federation-protocol",    wiki_page("federation-protocol")),
+    ("GET",  "/wiki/privacy",                wiki_page("privacy")),
+    ("GET",  "/wiki.css",                    raw_file("wiki.css", "text/css")),
     ("GET",  "/communicatie.css", page("communicatie.css", "text/css")),
     ("GET",  "/communicatie.js",  page("communicatie.js",  "application/javascript")),
     ("GET",  "/emoji-picker.js",   raw_file("emoji-picker.js",   "application/javascript")),

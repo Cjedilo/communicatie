@@ -1,0 +1,121 @@
+<div class="page-header">
+    <h2>Advanced settings</h2>
+</div>
+
+<section class="settings-section" id="adv_network_section">
+    <h3>Network
+        <button type="button" class="info-btn" aria-label="About network settings">i
+            <span class="info-popover">Bind address and ports. Defaults: 0.0.0.0, port 443, HTTP redirect on 80 (0 = disabled).<br><br>These settings override environment variables and require a restart to apply.<br><br>The base path is derived automatically from the Address on the Server page.</span>
+        </button>
+    </h3>
+    <label class="field-label">Base path <span class="hint">(derived from Address)</span></label>
+    <div class="inline-form">
+        <input type="text" id="adv_base_path" readonly maxlength="128">
+    </div>
+    <label class="field-label" style="margin-top:.5rem">Bind host</label>
+    <div class="inline-form">
+        <input type="text" id="adv_host" maxlength="64" placeholder="0.0.0.0">
+    </div>
+    <label class="field-label" style="margin-top:.4rem">HTTPS port</label>
+    <div class="inline-form">
+        <input type="number" id="adv_port" min="1" max="65535" style="width:6rem">
+    </div>
+    <label class="field-label" style="margin-top:.4rem">HTTP redirect port <span class="hint">(0 = disabled)</span></label>
+    <div class="inline-form">
+        <input type="number" id="adv_port_http" min="0" max="65535" style="width:6rem">
+    </div>
+    <div class="inline-form" style="margin-top:.7rem">
+        <button type="button" id="adv_network_save">Save</button>
+        <span id="adv_network_restart" class="hint hidden"> — restart to apply</span>
+    </div>
+</section>
+
+<section class="settings-section" id="adv_ratelimit_section">
+    <h3>Rate limiting
+        <button type="button" class="info-btn" aria-label="About rate limiting">i
+            <span class="info-popover">Limits are per fixed 60-second window.<br><br><strong>Login attempts</strong>: max failed logins per IP per minute. Protects against brute-force attacks.<br><strong>Messages</strong>: max messages a single user can send per minute.<br><strong>Trusted proxies</strong>: comma-separated IPs of reverse proxies (e.g. Apache) — only from these IPs is X-Forwarded-For trusted for rate limiting. Default: 127.0.0.1,::1.<br><br>Changes apply immediately without restart.</span>
+        </button>
+    </h3>
+    <label class="field-label">Login attempts per minute per IP</label>
+    <div class="inline-form">
+        <input type="number" id="adv_rate_login" min="1" max="1000" style="width:6rem">
+    </div>
+    <label class="field-label" style="margin-top:.5rem">Messages per minute per user</label>
+    <div class="inline-form">
+        <input type="number" id="adv_rate_messages" min="1" max="10000" style="width:6rem">
+    </div>
+    <label class="field-label" style="margin-top:.5rem">Trusted proxy IPs</label>
+    <div class="inline-form">
+        <input type="text" id="adv_trusted_proxies" maxlength="512" placeholder="127.0.0.1,::1">
+    </div>
+    <div class="inline-form" style="margin-top:.7rem">
+        <button type="button" id="adv_ratelimit_save">Save</button>
+        <span id="adv_ratelimit_ok" class="hint hidden"> — applied</span>
+    </div>
+</section>
+
+<section class="settings-section" id="adv_federation_section">
+    <h3>Federation
+        <button type="button" class="info-btn" aria-label="About federation settings">i
+            <span class="info-popover">Settings for server-to-server communication.<br><br><strong>Peer connect timeout</strong>: seconds to wait when connecting to a peer. Increase for slow or remote peers. Applies immediately.</span>
+        </button>
+    </h3>
+    <label class="field-label">Peer connect timeout (seconds)</label>
+    <div class="inline-form">
+        <input type="number" id="adv_peer_timeout" min="1" max="120" style="width:6rem">
+    </div>
+    <div class="inline-form" style="margin-top:.7rem">
+        <button type="button" id="adv_federation_save">Save</button>
+        <span id="adv_federation_ok" class="hint hidden"> — applied</span>
+    </div>
+</section>
+
+<section class="settings-section" id="adv_sessions_section">
+    <h3>Sessions
+        <button type="button" class="info-btn" aria-label="About session settings">i
+            <span class="info-popover">How long a login session stays valid. After this period users must log in again.<br><br>Existing sessions are not immediately invalidated — they expire naturally at their original expiry time. Change takes effect for new logins after restart.</span>
+        </button>
+    </h3>
+    <label class="field-label">Session duration (days)</label>
+    <div class="inline-form">
+        <input type="number" id="adv_session_days" min="1" max="3650" style="width:6rem">
+    </div>
+    <div class="inline-form" style="margin-top:.7rem">
+        <button type="button" id="adv_sessions_save">Save</button>
+        <span id="adv_sessions_restart" class="hint hidden"> — restart to apply</span>
+    </div>
+</section>
+
+<section class="settings-section" id="adv_updates_section">
+    <h3>Updates
+        <button type="button" class="info-btn" aria-label="About updates">i
+            <span class="info-popover">Messages can automatically install new releases every night.<br><br>Only tagged releases are applied — the main development branch is never automatically installed, so you stay on tested code.<br><br>Auto-update uses <code>git checkout &lt;tag&gt;</code> + pip install + service restart. Enable or disable it here without re-running install.sh.</span>
+        </button>
+    </h3>
+    <div id="adv_version_line" class="hint" style="margin-bottom:.6rem"></div>
+    <label class="checkbox-label" style="margin-bottom:.7rem">
+        <input type="checkbox" id="adv_auto_update">
+        Enable automatic nightly updates
+    </label>
+    <div class="inline-form" style="gap:.5rem">
+        <button type="button" id="adv_check_update_btn">Check for updates</button>
+        <button type="button" id="adv_apply_update_btn" class="hidden">Apply now</button>
+    </div>
+    <div id="adv_update_status" class="hint" style="margin-top:.4rem"></div>
+</section>
+
+<section class="settings-section" id="adv_uploads_section">
+    <h3>Uploads
+        <button type="button" class="info-btn" aria-label="About upload settings">i
+            <span class="info-popover">Maximum size for image uploads. The server buffers the full image in memory before processing it, so keep this reasonable.<br><br>Requires restart to apply.</span>
+        </button>
+    </h3>
+    <label class="field-label">Max upload size (MB)</label>
+    <div class="inline-form">
+        <input type="number" id="adv_upload_mb" min="1" max="500" style="width:6rem">
+    </div>
+    <div class="inline-form" style="margin-top:.7rem">
+        <button type="button" id="adv_uploads_save">Save</button>
+        <span id="adv_uploads_restart" class="hint hidden"> — restart to apply</span>
+    </div>
+</section>

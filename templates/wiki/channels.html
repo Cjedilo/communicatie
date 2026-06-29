@@ -1,0 +1,51 @@
+{% extends "wiki/_base.html" %}
+{% set active = "channels" %}
+{% block title %}Channels{% endblock %}
+
+{% block content %}
+<h1>Channels</h1>
+<p class="wiki-lead">Channels are where conversations happen — open to everyone, or just for a select group.</p>
+
+<nav class="wiki-toc">
+    <a href="#public-vs-private">Public vs private</a>
+    <a href="#creating">Creating a channel</a>
+    <a href="#stream">The stream</a>
+    <a href="#icon">Channel icon</a>
+    <a href="#remote">Remote channels</a>
+    <a href="#bans">Banning users</a>
+</nav>
+
+<hr>
+
+<h2 id="public-vs-private">Public vs private</h2>
+<p><strong>Public channels</strong> are open to everyone on your server and visible to users on connected servers. Anyone can read and post.</p>
+<p><strong>Private channels</strong> are invitation-only. They don't appear to anyone who isn't a member, and federated servers can only see them if at least one of their users has been added.</p>
+
+<hr>
+
+<h2 id="creating">Creating a channel</h2>
+<p>Go to <strong>💬 Channels</strong> and fill in the name at the bottom of the page. Tick <em>Private</em> if you want to control who can join. The channel is created immediately and you're its owner.</p>
+
+<hr>
+
+<h2 id="stream">The stream</h2>
+<p>Every channel has a toggle — 🔔 or 🔕 — that controls whether its messages appear in your Stream. Public channels are opt-in (you subscribe to them); private channels appear by default and you can mute them individually.</p>
+
+<hr>
+
+<h2 id="icon">Channel icon</h2>
+<p>The channel owner can change the icon that appears next to the channel name. Open the channel and click the icon in the header to pick a new one from the emoji picker.</p>
+
+<hr>
+
+<h2 id="remote">Remote channels</h2>
+<p>If your server is connected to peers, their public channels appear in the <strong>Remote channels</strong> section on the Channels page. You can subscribe to them and they'll show up in your Stream alongside local ones.</p>
+<p class="wiki-aside">Messages in remote channels are fetched on demand from the originating server — they're never stored locally. If the remote server is offline, older messages are temporarily unavailable. See <a href="{{ base_path }}/wiki/privacy">Privacy &amp; data</a> for more on how this works.</p>
+
+<hr>
+
+<h2 id="bans">Banning users</h2>
+<p>In public channels, the channel owner can ban users who are disrupting the conversation. Open the channel, click <strong>Ban users</strong> in the header, and drag someone from the active list to the banned list. Banned users can still see the channel but can no longer post.</p>
+<p>To unban, drag them back.</p>
+
+{% endblock %}

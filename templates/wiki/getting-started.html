@@ -1,0 +1,108 @@
+{% extends "wiki/_base.html" %}
+{% set active = "getting-started" %}
+{% block title %}Getting started{% endblock %}
+
+{% block content %}
+<h1>Getting started</h1>
+<p class="wiki-lead">Two paths: join a server someone else runs, or run your own.</p>
+
+<nav class="wiki-toc">
+    <a href="#as-a-user">As a user</a>
+    <a href="#as-an-admin">As an admin</a>
+</nav>
+
+<hr>
+
+<h2 id="as-a-user">As a user</h2>
+
+<h3>Someone shared a link with you</h3>
+<p>To join a Messages server you need two things: a web address from whoever runs it, and a browser.</p>
+
+<h3>Step 1 — Open the address</h3>
+<p>The server address looks something like <code>https://example.com/chat</code> or <code>https://192.168.1.10:8443</code>. Open it in your browser. You'll see a login page.</p>
+
+<h3>Step 2 — Create an account</h3>
+<p>Click <strong>Register</strong>, pick a username and a password (at least 8 characters). Your username is your login name — it can't be changed later, so choose something you're happy with.</p>
+
+<p class="wiki-aside">Your account exists only on this server. There's no central sign-up, no email required.</p>
+
+<h3>Step 3 — You're in</h3>
+<p>After registering you land on the Stream — a feed of recent messages across all channels you have access to. Use the icons on the left to navigate:</p>
+
+<table class="wiki-table">
+    <tr><td>🌊</td><td><strong>Stream</strong> — everything at a glance</td></tr>
+    <tr><td>💬</td><td><strong>Channels</strong> — browse and join conversations</td></tr>
+    <tr><td>🔗</td><td><strong>Peers</strong> — other servers you're connected to</td></tr>
+    <tr><td>👥</td><td><strong>Users</strong> — people on this and connected servers</td></tr>
+    <tr><td>⚙️</td><td><strong>Server</strong> — settings (owner only)</td></tr>
+    <tr><td>👤</td><td><strong>Your profile</strong></td></tr>
+</table>
+
+<h3>Step 4 — Make it yours</h3>
+<p>Go to your profile (👤) to personalise your account:</p>
+<ul>
+    <li><strong>Display name</strong> — the name others see in conversations. Your login name stays the same; this is just what's shown.</li>
+    <li><strong>Avatar</strong> — upload a photo or image. It appears next to your messages and on your profile. Tap <em>Change avatar</em> to upload one.</li>
+</ul>
+
+<h3>Step 5 — Add to your homescreen (optional)</h3>
+<p>Messages works as a web app on your phone. In your browser, choose <em>Add to homescreen</em> (Chrome: menu → Add to homescreen; Safari: share → Add to homescreen). It opens full-screen, just like a native app.</p>
+
+<hr>
+
+<h2 id="as-an-admin">As an admin</h2>
+
+<h3>Running your own server</h3>
+<p>Running a Messages server means you control everything — who can join, what's stored, and how it connects to others.</p>
+
+<h3>What you need</h3>
+<ul>
+    <li>A machine that stays on — a Raspberry Pi 4 or 5, a mini PC, an old laptop, or a cheap VPS. Something drawing ~5W is plenty for a household or small group.</li>
+    <li>Linux or Windows</li>
+    <li>A stable internet connection — fiber is ideal, but any always-on connection works</li>
+    <li>A domain name or static IP if you want people outside your network to connect</li>
+</ul>
+
+<h3>Step 1 — Install</h3>
+<pre><code>git clone https://github.com/Cjedilo/communicatie.git
+cd communicatie
+./install.sh        # Windows: install.cmd</code></pre>
+
+<p>The installer asks a few questions — which port to use if 80 or 443 are taken, where to store uploaded images — and sets up Messages as a background service. When it's done, it prints one important URL:</p>
+
+<pre><code>Setup complete. Open this URL to claim your server as admin:
+
+  https://192.168.1.10:8443/setup/a3f9c2...</code></pre>
+
+<p class="wiki-aside"><strong>Keep this URL safe — it's shown once.</strong></p>
+
+<h3>Step 2 — Claim your server</h3>
+<p>Open the URL the installer printed. You'll be asked to create your admin account. The first — and only — person to open that URL becomes the owner with full access to all server settings.</p>
+
+<h3>Step 3 — Set your server name and address</h3>
+<p>Go to <strong>⚙️ Server</strong>. Under <em>Identity</em>:</p>
+<ul>
+    <li><strong>Name</strong> — how your server appears to peers. Pick something recognisable, like your name or household.</li>
+    <li><strong>Address</strong> — the full <code>wss://</code> address others use to reach you, e.g. <code>wss://myhome.example.com/chat</code>. This is what you share with people you want to connect with.</li>
+</ul>
+
+<h3>Step 4 — Open a port</h3>
+<p>For people outside your home network to reach your server, forward the port you chose during setup on your router to this machine.</p>
+
+<p class="wiki-aside">Port forwarding varies by router — see the <a href="{{ base_path }}/wiki/getting-started">router setup guide</a> for step-by-step instructions for common models.</p>
+
+<h3>Step 5 — Invite someone</h3>
+<p>Copy your server address from the <em>Identity</em> section — it looks like <code>https://myhome.example.com/chat</code> or <code>https://192.168.1.10:8443</code>. Send that to whoever you want to invite. They open it in a browser, register, and they're in.</p>
+
+<p class="wiki-aside">The <code>wss://</code> address in the Identity field is for server-to-server federation — that's what you share with other server admins. Regular users always use <code>https://</code>.</p>
+
+<h3>A note on the browser warning</h3>
+<p>If you don't have a domain name and a trusted certificate yet, your browser will show a warning along the lines of <em>"Your connection is not private"</em> the first time someone visits.</p>
+<p><strong>This looks worse than it is.</strong> The warning doesn't mean the connection is unencrypted — it means the certificate hasn't been signed by a trusted authority. Traffic is still encrypted end-to-end. The warning simply reflects that the browser can't verify the server's identity through a third party.</p>
+<p>For a server run by someone you trust — a family member, a friend — this is fine. Click <em>Advanced → Proceed</em> and you're through. Your browser will remember it.</p>
+<p><strong>If you want to get rid of the warning entirely</strong>, the cleanest path is a real domain name with a Let's Encrypt certificate. Messages can set this up for you automatically — see the <a href="{{ base_path }}/wiki/server">SSL certificate guide</a>.</p>
+
+<h3>Step 6 — Connect to other servers</h3>
+<p>Go to <strong>🔗 Peers</strong> and paste the address of another Messages server. Once connected, you can see each other's public channels and message each other's users directly.</p>
+
+{% endblock %}
