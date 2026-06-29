@@ -418,6 +418,7 @@ routes = [
     ("POST", "/setup/{secret}",              setup_claim),
     ("GET",  "/wiki/",                       wiki_page("home")),
     ("GET",  "/wiki/getting-started",        wiki_page("getting-started")),
+    ("GET",  "/wiki/router",                 wiki_page("router")),
     ("GET",  "/wiki/channels",               wiki_page("channels")),
     ("GET",  "/wiki/users",                   wiki_page("users-page")),
     ("GET",  "/wiki/peers",                  wiki_page("peers")),

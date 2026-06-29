@@ -1,0 +1,135 @@
+{% extends "wiki/_base.html" %}
+{% set active = "router" %}
+{% block title %}Router setup{% endblock %}
+
+{% block content %}
+<h1>Router setup &amp; port forwarding</h1>
+<p class="wiki-lead">To let people outside your home network reach your server, you need to tell your router to forward incoming traffic to the machine running Messages.</p>
+
+<nav class="wiki-toc">
+    <a href="#what-is-port-forwarding">What it is</a>
+    <a href="#find-local-ip">Your local IP</a>
+    <a href="#static-ip">Static local IP</a>
+    <a href="#port-forwarding">Port forwarding</a>
+    <a href="#test">Test it</a>
+    <a href="#common-routers">Common routers</a>
+</nav>
+
+<hr>
+
+<h2 id="what-is-port-forwarding">What is port forwarding?</h2>
+<p>Your internet connection has one public IP address shared by all devices in your home. When an outside visitor connects to your server, the connection arrives at your router. Without port forwarding, the router doesn't know which device to pass it to, so it drops it.</p>
+<p>Port forwarding creates a rule: <em>traffic arriving on port X → send it to this machine on this internal IP.</em></p>
+
+<hr>
+
+<h2 id="find-local-ip">Step 1 — Find your machine's local IP</h2>
+<p>The local IP is the address your router assigned to the machine running Messages. It usually looks like <code>192.168.1.x</code> or <code>10.0.0.x</code>.</p>
+
+<table class="wiki-table">
+    <tr>
+        <th>OS</th>
+        <th>Command</th>
+    </tr>
+    <tr>
+        <td>Linux</td>
+        <td><code>ip addr show | grep "inet "</code></td>
+    </tr>
+    <tr>
+        <td>Windows</td>
+        <td><code>ipconfig</code> — look for <em>IPv4 Address</em></td>
+    </tr>
+    <tr>
+        <td>macOS</td>
+        <td><code>ifconfig | grep "inet "</code></td>
+    </tr>
+</table>
+
+<p>Write it down — you'll need it in the port forwarding rule.</p>
+
+<hr>
+
+<h2 id="static-ip">Step 2 — Give the machine a static local IP</h2>
+<p>By default, routers hand out IP addresses dynamically — your machine might get a different address after a reboot. If that happens, your port forwarding rule points at the wrong device.</p>
+<p>The easiest fix is a <strong>DHCP reservation</strong> (also called <em>static DHCP</em> or <em>IP binding</em>): you tell the router to always give this machine the same address, based on its MAC address. No changes needed on the machine itself.</p>
+
+<p>In your router admin panel, look for:</p>
+<ul>
+    <li><em>DHCP reservations</em></li>
+    <li><em>Static IP assignment</em></li>
+    <li><em>IP &amp; MAC binding</em></li>
+    <li><em>Address reservation</em></li>
+</ul>
+
+<p>Add a reservation for your machine's MAC address and assign it the IP you found in step 1.</p>
+
+<hr>
+
+<h2 id="port-forwarding">Step 3 — Create a port forwarding rule</h2>
+<p>Log into your router admin panel. The address is usually <code>192.168.1.1</code> or <code>192.168.0.1</code> — type it in a browser. If that doesn't work, run <code>ip route | grep default</code> (Linux) or look at the <em>Default Gateway</em> in <code>ipconfig</code> (Windows).</p>
+
+<p>Navigate to the port forwarding section. Common names:</p>
+<ul>
+    <li><em>Port Forwarding</em></li>
+    <li><em>Virtual Server</em></li>
+    <li><em>NAT / PAT</em></li>
+    <li><em>Applications &amp; Gaming</em></li>
+</ul>
+
+<p>Create a new rule with these values:</p>
+
+<table class="wiki-table">
+    <tr><th>Field</th><th>Value</th></tr>
+    <tr><td>Service / Name</td><td><code>Messages</code></td></tr>
+    <tr><td>Protocol</td><td>TCP</td></tr>
+    <tr><td>External port</td><td>443 (or the port you chose during install)</td></tr>
+    <tr><td>Internal IP</td><td>The local IP of your machine</td></tr>
+    <tr><td>Internal port</td><td>Same as external port</td></tr>
+</table>
+
+<p>Save and apply. Some routers need a reboot to activate rules.</p>
+
+<p class="wiki-aside">If you're also using port 80 for the HTTP redirect, add a second rule with the same internal IP, protocol TCP, and port 80.</p>
+
+<hr>
+
+<h2 id="test">Step 4 — Test it</h2>
+<p>Find your public IP at a site like <code>ifconfig.me</code> (just open it in a browser). Then try opening <code>https://&lt;your-public-ip&gt;:443</code> from a device on a different network — a phone with Wi-Fi turned off works well.</p>
+<p>If it works: great. Set up a domain name to avoid sharing a raw IP address with people.</p>
+<p>If it doesn't:</p>
+<ul>
+    <li>Check that Messages is actually running (<code>systemctl status messages</code> on Linux)</li>
+    <li>Check that the firewall on the machine allows the port (<code>sudo ufw allow 443/tcp</code> on Ubuntu)</li>
+    <li>Some ISPs block port 443 on residential connections — try port 8443 instead</li>
+</ul>
+
+<hr>
+
+<h2 id="common-routers">Common routers</h2>
+
+<h3>ASUS</h3>
+<p>Go to <em>WAN → Virtual Server / Port Forwarding</em>. Click <em>Add profile</em>. Fill in service name, protocol (TCP), external and internal port, and the local IP. Click <em>OK</em>, then <em>Apply</em>.</p>
+<p>For DHCP reservation: <em>LAN → DHCP Server → Manually Assigned IP</em>.</p>
+
+<h3>TP-Link (Archer)</h3>
+<p>Go to <em>Advanced → NAT Forwarding → Virtual Servers</em>. Click <em>Add</em>. Fill in external and internal port, protocol TCP, and internal IP. Save.</p>
+<p>For DHCP reservation: <em>Advanced → Network → DHCP Server → Address Reservation</em>.</p>
+
+<h3>FRITZ!Box</h3>
+<p>Go to <em>Internet → Permit Access → Port Sharing</em>. Click <em>New port sharing</em>. Choose <em>Other application</em>, fill in a name, select the device, set protocol to TCP and both ports to your chosen value. Click <em>OK</em>.</p>
+<p>FRITZ!Box assigns static local IPs automatically when you set up port sharing — select <em>Always assign this network device the same IPv4 address</em> when prompted.</p>
+
+<h3>Netgear</h3>
+<p>Go to <em>Advanced → Advanced Setup → Port Forwarding / Port Triggering</em>. Click <em>Add Custom Service</em>. Fill in name, TCP, start and end port (same number), and the internal IP. Click <em>Apply</em>.</p>
+<p>For DHCP reservation: <em>Advanced → Setup → LAN Setup → Address Reservation → Add</em>.</p>
+
+<h3>Ziggo Connect Box / UPC</h3>
+<p>Go to <em>Advanced → Security → Port Forwarding</em>. Add a rule with the local IP, TCP, and the port number for both start and end. Save.</p>
+
+<h3>KPN Experia Box</h3>
+<p>Go to <em>Internet → Poort Doorsturen</em>. Add a new rule for TCP, the chosen port, and the local IP of your machine. Save.</p>
+
+<hr>
+
+<p class="wiki-aside">Still stuck? The site <a href="https://portforward.com" target="_blank" rel="noopener">portforward.com</a> has step-by-step guides for hundreds of specific router models.</p>
+{% endblock %}
