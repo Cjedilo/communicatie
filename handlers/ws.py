@@ -357,10 +357,11 @@ async def _handle_start_chat(data: dict, session: dict, ws: web.WebSocketRespons
 async def _handle_create_channel(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
     name   = _require_str(data, "name", 128)
     public = bool(data.get("public", True))
+    icon   = _require_str(data, "icon", 8)
     if not name:
         return _err("create_channel", "Channel name required")
 
-    channel = await db.channel_create(name, public, session["user_id"])
+    channel = await db.channel_create(name, public, session["user_id"], icon)
     if not public:
         # Creator is automatically a member of private channels
         await db.member_add(channel["id"], session["user_id"])

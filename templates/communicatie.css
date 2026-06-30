@@ -532,6 +532,28 @@ textarea#message_input:focus { outline: 2px solid var(--accent); }
     flex-shrink: 0;
 }
 
+.new-channel-form {
+    padding: 1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+}
+
+.new-channel-icon-row {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+}
+
+.new-channel-icon-row .chat-icon {
+    font-size: 1.6rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: .3rem .55rem;
+}
+
+.new-channel-icon-row input { flex: 1; }
+
 .member_columns {
     display: flex;
     gap: 1rem;

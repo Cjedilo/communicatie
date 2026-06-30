@@ -12,14 +12,25 @@
     <h3>Local channels</h3>
     <input type="search" id="local_filter" class="filter-input" placeholder="Filter…">
     <ul id="channels_list" class="item-list"></ul>
-    <form id="create_channel_form">
-        <input type="text" id="channel_name" placeholder="New channel name" maxlength="128">
+    <button type="button" id="new_channel_btn" class="secondary">+ New channel</button>
+</section>
+
+<div id="new_channel_overlay" class="hidden overlay">
+    <div class="overlay-header">
+        <span>New channel</span>
+        <button type="button" id="close_new_channel" class="secondary">Cancel</button>
+    </div>
+    <form id="create_channel_form" class="new-channel-form">
+        <div class="new-channel-icon-row">
+            <span id="new_channel_icon" class="chat-icon" title="Choose icon">🗨️</span>
+            <input type="text" id="channel_name" placeholder="Channel name" maxlength="128" required>
+        </div>
         <label class="checkbox-label">
             <input type="checkbox" id="channel_private"> Private
         </label>
         <button type="submit">Create</button>
     </form>
-</section>
+</div>
 
 <section class="settings-section" id="remote_channels_section">
     <h3>Remote channels</h3>

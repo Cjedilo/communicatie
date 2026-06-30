@@ -404,19 +404,19 @@ async def sessions_purge_expired():
 # Channels
 # ---------------------------------------------------------------------------
 
-async def channel_create(name: str, public: bool, created_by: uuid.UUID) -> dict:
+async def channel_create(name: str, public: bool, created_by: uuid.UUID, icon: str | None = None) -> dict:
     cid  = _new_id()
     pub  = 1 if (_is_sqlite and public) else public
     excl = 1 if (_is_sqlite and public) else public  # public → excluded from stream by default
     if _is_sqlite:
         await _db.execute(
-            "INSERT INTO channels(id,name,public,created_by,stream_excluded) VALUES($1,$2,$3,$4,$5)",
-            cid, name, pub, created_by, excl,
+            "INSERT INTO channels(id,name,public,created_by,stream_excluded,icon) VALUES($1,$2,$3,$4,$5,$6)",
+            cid, name, pub, created_by, excl, icon,
         )
         return await _db.fetchrow("SELECT * FROM channels WHERE id=$1", cid)
     return await _db.fetchrow(
-        "INSERT INTO channels(id,name,public,created_by,stream_excluded) VALUES($1,$2,$3,$4,$5) RETURNING *",
-        cid, name, public, created_by, public,
+        "INSERT INTO channels(id,name,public,created_by,stream_excluded,icon) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
+        cid, name, public, created_by, public, icon,
     )
 
 

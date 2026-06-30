@@ -116,6 +116,43 @@ function _channel_icon(ch) {
         return ch.icon || (ch.public ? "🌐" : "🔒");
     }
 
+    // Mounts the emoji picker anchored to `anchor_el` (which must be
+    // position:relative); calls on_pick(emoji) and tears itself down on pick
+    // or on the next click anywhere else.
+    function _open_icon_picker(anchor_el, on_pick) {
+        if (document.getElementById("icon_picker")) return;
+        var wrap = document.createElement("div");
+        wrap.id = "icon_picker";
+        wrap.className = "icon-picker-wrap";
+        anchor_el.appendChild(wrap);
+
+        function _mount_picker(EmojiPickerEl) {
+            var picker = new EmojiPickerEl();
+            picker.dataSource = _bp + "/emoji-data.json";
+            wrap.appendChild(picker);
+            wrap.addEventListener("emoji-click", function (ev) {
+                var em = ev.detail.unicode;
+                if (!em) return;
+                wrap.remove();
+                on_pick(em);
+            });
+        }
+
+        if (window._EmojiPicker) {
+            _mount_picker(window._EmojiPicker);
+        } else {
+            import(_bp + "/emoji-picker.js").then(function (mod) {
+                window._EmojiPicker = mod.Picker;
+                _mount_picker(mod.Picker);
+            });
+        }
+
+        var close_picker = function () { wrap.remove(); };
+        setTimeout(function () {
+            document.addEventListener("click", close_picker, { once: true });
+        }, 0);
+    }
+
     function make(tag, cls, text) {
         var el = document.createElement(tag);
         if (cls)  el.className = cls;
@@ -761,41 +798,13 @@ function load_channel() {
                     icon_el.style.cursor = "pointer";
                     icon_el.addEventListener("click", function (e) {
                         e.stopPropagation();
-                        if (document.getElementById("icon_picker")) return;
-                        var wrap = document.createElement("div");
-                        wrap.id = "icon_picker";
-                        wrap.className = "icon-picker-wrap";
-                        icon_el.appendChild(wrap);
-
-                        function _mount_picker(EmojiPickerEl) {
-                            var picker = new EmojiPickerEl();
-                            picker.dataSource = _bp + "/emoji-data.json";
-                            wrap.appendChild(picker);
-                            wrap.addEventListener("emoji-click", function (ev) {
-                                var em = ev.detail.unicode;
-                                if (!em) return;
-                                request("set_channel_icon", { channel_id: ch.id, icon: em }).then(function (r) {
-                                    if (!r.ok) { show_error(r.reason); return; }
-                                    ch.icon = em;
-                                    icon_el.textContent = em;
-                                    wrap.remove();
-                                });
+                        _open_icon_picker(icon_el, function (em) {
+                            request("set_channel_icon", { channel_id: ch.id, icon: em }).then(function (r) {
+                                if (!r.ok) { show_error(r.reason); return; }
+                                ch.icon = em;
+                                icon_el.textContent = em;
                             });
-                        }
-
-                        if (window._EmojiPicker) {
-                            _mount_picker(window._EmojiPicker);
-                        } else {
-                            import(_bp + "/emoji-picker.js").then(function (mod) {
-                                window._EmojiPicker = mod.Picker;
-                                _mount_picker(mod.Picker);
-                            });
-                        }
-
-                        var close_picker = function () { wrap.remove(); };
-                        setTimeout(function () {
-                            document.addEventListener("click", close_picker, { once: true });
-                        }, 0);
+                        });
                     });
                 }
             }
@@ -2104,15 +2113,45 @@ function load_channel() {
             _setup_collapsible_filter(rlist, document.getElementById("remote_filter"));
         });
 
+        var new_btn      = document.getElementById("new_channel_btn");
+        var new_overlay  = document.getElementById("new_channel_overlay");
+        var new_close    = document.getElementById("close_new_channel");
+        var new_icon_el  = document.getElementById("new_channel_icon");
+        var default_icon = "🗨️";
+        var new_icon     = default_icon;
+
+        function reset_new_channel_form() {
+            document.getElementById("channel_name").value = "";
+            document.getElementById("channel_private").checked = false;
+            new_icon = default_icon;
+            new_icon_el.textContent = default_icon;
+        }
+
+        new_btn.addEventListener("click", function () {
+            reset_new_channel_form();
+            new_overlay.classList.remove("hidden");
+            document.getElementById("channel_name").focus();
+        });
+        new_close.addEventListener("click", function () {
+            new_overlay.classList.add("hidden");
+        });
+        new_icon_el.addEventListener("click", function (e) {
+            e.stopPropagation();
+            _open_icon_picker(new_icon_el, function (em) {
+                new_icon = em;
+                new_icon_el.textContent = em;
+            });
+        });
+
         document.getElementById("create_channel_form").addEventListener("submit", function (e) {
             e.preventDefault();
             var name    = document.getElementById("channel_name").value.trim();
             var private_ = document.getElementById("channel_private").checked;
             if (!name) return;
-            request("create_channel", { name: name, public: !private_ }).then(function (d) {
+            request("create_channel", { name: name, public: !private_, icon: new_icon }).then(function (d) {
                 if (!d.ok) { show_error(d.reason); return; }
-                document.getElementById("channel_name").value = "";
-                document.getElementById("channel_private").checked = false;
+                new_overlay.classList.add("hidden");
+                reset_new_channel_form();
                 var list = document.getElementById("channels_list");
                 list.appendChild(build_channel_item(list, d.channel, _own_host_address));
             });
