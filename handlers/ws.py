@@ -419,6 +419,11 @@ async def _handle_read_channel(data: dict, session: dict, ws: web.WebSocketRespo
         } if owner else None
         return _err("read_channel", err, channel_name=(ch["name"] if ch else None), owner=owner_info)
 
+    if channel.get("created_by"):
+        creator = await db.user_by_id(channel["created_by"])
+        if creator:
+            channel["created_by_name"] = creator.get("display_name") or creator["name"]
+
     _subscribe_to_channel(cid, ws)
     messages = await db.messages_for_channel(cid)
     host_address = await db.setting_get("peer_address") or _detect_address()
@@ -457,7 +462,7 @@ async def _handle_message(data: dict, session: dict, ws: web.WebSocketResponse) 
         avatar_url = f"{base_url}/img/{user['avatar']}" if user.get("avatar") else None
 
         from federation import send_message_to_peer
-        ok = await send_message_to_peer(
+        ok, info = await send_message_to_peer(
             peer, cid, msg_id, session["user_id"], our_address, created,
             sender_name=user["name"] or "",
             sender_avatar=avatar_url,
@@ -466,7 +471,9 @@ async def _handle_message(data: dict, session: dict, ws: web.WebSocketResponse) 
             has_image=bool(image),
         )
         if not ok:
-            return _err("message", "Could not deliver message to remote server")
+            channel_info = info.get("channel") or {}
+            return _err("message", info.get("reason") or "Could not deliver message to remote server",
+                        channel_name=channel_info.get("name"), owner=info.get("owner"), peer_id=peer_id)
 
     else:
         # ── Local channel: store index + content here ──
@@ -531,10 +538,10 @@ async def _handle_read_members(data: dict, session: dict, ws: web.WebSocketRespo
     if not channel:
         return _err("read_members", "Channel not found")
 
-    owner_id   = await db.setting_get("owner_id")
-    is_owner   = str(session["user_id"]) == owner_id
-    is_creator = channel["created_by"] == session["user_id"]
-    if not is_owner and not is_creator:
+    # Only the channel's own creator can manage its membership — being the
+    # server owner grants no special rights over chats someone else made.
+    can_manage = channel["created_by"] == session["user_id"]
+    if not can_manage and not await db.is_member(cid, session["user_id"]):
         return _err("read_members", "Not authorised")
 
     members    = await db.members_of(cid)
@@ -545,6 +552,11 @@ async def _handle_read_members(data: dict, session: dict, ws: web.WebSocketRespo
         if peer_addr and m.get("avatar") and not str(m["avatar"]).startswith(("http", "/")):
             base = peer_addr.replace("wss://", "https://").replace("ws://", "http://")
             m["avatar"] = f"{config.BASE_PATH}/proxy_img?url={base}/img/{m['avatar']}"
+
+    if not can_manage:
+        # Read-only viewers don't need the "not members" list — that's an editing affordance.
+        return _ok("read_members", members=members, non_members=[], can_manage=False)
+
     member_ids = {
         (str(m["user_id"]), str(m["peer_id"]) if m.get("peer_id") else None)
         for m in members
@@ -564,7 +576,7 @@ async def _handle_read_members(data: dict, session: dict, ws: web.WebSocketRespo
         if (str(u["id"]), str(u["peer_id"]) if u.get("peer_id") else None) not in member_ids
     ]
 
-    return _ok("read_members", members=members, non_members=non_members)
+    return _ok("read_members", members=members, non_members=non_members, can_manage=True)
 
 
 async def _handle_set_member(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
@@ -580,10 +592,9 @@ async def _handle_set_member(data: dict, session: dict, ws: web.WebSocketRespons
     if not channel:
         return _err("set_member", "Channel not found")
 
-    owner_id   = await db.setting_get("owner_id")
-    is_owner   = str(session["user_id"]) == owner_id
-    is_creator = channel["created_by"] == session["user_id"]
-    if not is_owner and not is_creator:
+    # Only the channel's own creator can manage its membership — being the
+    # server owner grants no special rights over chats someone else made.
+    if channel["created_by"] != session["user_id"]:
         return _err("set_member", "Not authorised")
 
     if is_member:
@@ -607,13 +618,17 @@ async def _handle_read_bans(data: dict, session: dict, ws: web.WebSocketResponse
     channel = await db.channel_by_id(cid)
     if not channel:
         return _err("read_bans", "Channel not found")
-    owner_id   = await db.setting_get("owner_id")
-    is_owner   = str(session["user_id"]) == owner_id
-    is_creator = channel["created_by"] == session["user_id"]
-    if not is_owner and not is_creator:
-        return _err("read_bans", "Not authorised")
+    # Only the channel's own creator can manage bans — being the server
+    # owner grants no special rights over chats someone else made.
+    can_manage = channel["created_by"] == session["user_id"]
 
-    banned       = await db.channel_bans_for(cid)
+    banned = await db.channel_bans_for(cid)
+
+    if not can_manage:
+        # Anyone can see who's banned from a public channel — only the
+        # creator gets the participant list needed to ban someone new.
+        return _ok("read_bans", banned=banned, not_banned=[], can_manage=False)
+
     banned_ids   = {str(b["user_id"]) for b in banned}
     # Participants = users who sent ≥1 message; exclude the requester (can't ban yourself)
     participants = await db.channel_participants(cid)
@@ -622,7 +637,7 @@ async def _handle_read_bans(data: dict, session: dict, ws: web.WebSocketResponse
         p for p in participants
         if str(p["user_id"]) not in banned_ids and str(p["user_id"]) != my_id
     ]
-    return _ok("read_bans", banned=banned, not_banned=not_banned)
+    return _ok("read_bans", banned=banned, not_banned=not_banned, can_manage=True)
 
 
 async def _handle_set_ban(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
@@ -635,10 +650,9 @@ async def _handle_set_ban(data: dict, session: dict, ws: web.WebSocketResponse) 
     channel = await db.channel_by_id(cid)
     if not channel:
         return _err("set_ban", "Channel not found")
-    owner_id   = await db.setting_get("owner_id")
-    is_owner   = str(session["user_id"]) == owner_id
-    is_creator = channel["created_by"] == session["user_id"]
-    if not is_owner and not is_creator:
+    # Only the channel's own creator can manage bans — being the server
+    # owner grants no special rights over chats someone else made.
+    if channel["created_by"] != session["user_id"]:
         return _err("set_ban", "Not authorised")
     if blocked:
         await db.channel_ban_add(cid, uid, pid)

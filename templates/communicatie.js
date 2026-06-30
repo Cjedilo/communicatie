@@ -725,7 +725,19 @@ function load_channel() {
 
             var chan_name = (d.channel && d.channel.name) || "";
             var title = document.getElementById("chat_title");
-            if (title) title.textContent = chan_name;
+            if (title) {
+                title.textContent = chan_name;
+                if (d.channel && typeof d.channel.public !== "undefined") {
+                    var vis = make("span", "chat-visibility", d.channel.public ? " 🌐" : " 🔒");
+                    vis.title = d.channel.public ? "Public channel" : "Private channel";
+                    title.appendChild(vis);
+                }
+                // Only present for real channels — DMs have no meaningful owner
+                if (d.channel && d.channel.created_by_name) {
+                    title.appendChild(make("span", "chat-creator-tag",
+                        " · Created by " + d.channel.created_by_name));
+                }
+            }
             if (chan_name) document.title = chan_name;
 
             var ch = d.channel || {};
@@ -834,12 +846,16 @@ function load_channel() {
             btn.addEventListener("click", function () {
                 request("read_members", { channel_id: current_channel_id }).then(function (d) {
                     if (!d.ok) { show_error(d.reason); return; }
-                    // Reset drop handlers to member mode
-                    document.getElementById("members_list").setAttribute(
-                        "ondrop", "communicatie.drop_member(event, true)");
-                    document.getElementById("non_members_list").setAttribute(
-                        "ondrop", "communicatie.drop_member(event, false)");
-                    open_member_manager(d.members, d.non_members);
+                    if (d.can_manage) {
+                        // Reset drop handlers to member mode
+                        document.getElementById("members_list").setAttribute(
+                            "ondrop", "communicatie.drop_member(event, true)");
+                        document.getElementById("non_members_list").setAttribute(
+                            "ondrop", "communicatie.drop_member(event, false)");
+                        open_member_manager(d.members, d.non_members, channel.name);
+                    } else {
+                        open_readonly_list("Members", d.members, channel.name);
+                    }
                 });
             });
         }
@@ -851,7 +867,11 @@ function load_channel() {
             bbtn.addEventListener("click", function () {
                 request("read_bans", { channel_id: current_channel_id }).then(function (d) {
                     if (!d.ok) { show_error(d.reason); return; }
-                    open_ban_manager(d.banned, d.not_banned);
+                    if (d.can_manage) {
+                        open_ban_manager(d.banned, d.not_banned, channel.name);
+                    } else {
+                        open_readonly_list("Banned users", d.banned, channel.name);
+                    }
                 });
             });
         }
@@ -983,15 +1003,30 @@ function load_channel() {
     function send_message() {
         var text = document.getElementById("message_input").value.trim();
         if (!text && !pending_image) return;
+        var send_peer = current_channel_peer;
 
         request("message", {
             channel_id: current_channel_id,
-            peer_id:    current_channel_peer,
+            peer_id:    send_peer,
             text:       text || null,
             image:      pending_image || null,
             parent_id:  pending_parent_id || null,
         }).then(function (d) {
-            if (!d.ok) show_error(d.reason || "Could not send message");
+            if (d.ok) return;
+            if (d.owner) {
+                // Access was lost between opening the chat and sending — same
+                // "ask for access" flow as opening a channel you can't read.
+                start_assisted_chat(d.owner.id, send_peer, d.owner.name,
+                    "Hi! Could I get access to \"" + (d.channel_name || "this chat") + "\"?",
+                    "🔒 You no longer have access to \"" + (d.channel_name || "this chat") +
+                    "\" — here's a draft message to ask " + d.owner.name + " for access. Review it and hit send.");
+                return;
+            }
+            // Message never arrived — give it back rather than losing it,
+            // unless the user has already started typing something new.
+            var input = document.getElementById("message_input");
+            if (input && !input.value) input.value = text;
+            show_error(d.reason || "Could not send message");
         });
 
         document.getElementById("message_input").value = "";
@@ -1042,10 +1077,13 @@ function load_channel() {
         }
     }
 
-    function open_member_manager(members, non_members) {
-        document.getElementById("manager_title").textContent  = "Members";
+    function open_member_manager(members, non_members, chan_name) {
+        document.getElementById("manager_title").textContent  =
+            chan_name ? "Members — " + chan_name : "Members";
         document.getElementById("col_left_title").textContent = "Members";
         document.getElementById("col_right_title").textContent = "Not members";
+        var right_col = document.getElementById("member_manager_right_col");
+        if (right_col) right_col.classList.remove("hidden");
         var mgr = document.getElementById("member_manager");
         mgr.classList.remove("hidden");
 
@@ -1059,10 +1097,13 @@ function load_channel() {
         _setup_manager_filters(mlist, nmlist);
     }
 
-    function open_ban_manager(blocked, not_banned) {
-        document.getElementById("manager_title").textContent  = "Ban users";
+    function open_ban_manager(blocked, not_banned, chan_name) {
+        document.getElementById("manager_title").textContent  =
+            chan_name ? "Ban users — " + chan_name : "Ban users";
         document.getElementById("col_left_title").textContent = "Blocked";
         document.getElementById("col_right_title").textContent = "Users";
+        var right_col = document.getElementById("member_manager_right_col");
+        if (right_col) right_col.classList.remove("hidden");
         // Rewire drop handlers for blocks
         document.getElementById("members_list").setAttribute(
             "ondrop", "communicatie.drop_ban(event, true)");
@@ -1081,9 +1122,27 @@ function load_channel() {
         _setup_manager_filters(blist, ublist);
     }
 
-    function member_item(user) {
+    // Read-only single-column view for users who can see but not manage
+    // (any member of a private channel; anyone for a public channel's bans).
+    function open_readonly_list(title, users, chan_name) {
+        document.getElementById("manager_title").textContent  =
+            chan_name ? title + " — " + chan_name : title;
+        document.getElementById("col_left_title").textContent = title;
+        var right_col = document.getElementById("member_manager_right_col");
+        if (right_col) right_col.classList.add("hidden");
+        var mgr = document.getElementById("member_manager");
+        mgr.classList.remove("hidden");
+
+        var mlist = document.getElementById("members_list");
+        mlist.removeAttribute("ondrop");
+        mlist.replaceChildren();
+        users.forEach(function (u) { mlist.appendChild(member_item(u, false)); });
+        _setup_manager_filters(mlist, mlist);
+    }
+
+    function member_item(user, draggable) {
         var li = make("li", "member-item");
-        li.draggable      = true;
+        li.draggable      = draggable !== false;
         li.dataset.uid    = user.id;
         li.dataset.peerId = user.peer_id || "";
         var av = user.avatar;
@@ -1993,6 +2052,8 @@ function load_channel() {
                     peer.channels.forEach(function (ch) {
                         var li   = make("li", "peer-channel");
                         var icon = make("span", "icon", _channel_icon(ch));
+                        var vis  = make("span", "channel-visibility", ch.public ? "🌐" : "🔒");
+                        vis.title = ch.public ? "Public channel" : "Private channel";
                         var link = make("a", null, ch.name);
                         link.href = "#";
                         link.addEventListener("click", function (e) {
@@ -2000,6 +2061,7 @@ function load_channel() {
                             open_channel(ch.id, peer.id);
                         });
                         li.appendChild(icon);
+                        li.appendChild(vis);
                         li.appendChild(link);
 
                         var share = make("span", "stream-toggle", "📤");
@@ -2061,6 +2123,8 @@ function load_channel() {
         var is_mine = ch.created_by === user_id;
         var li   = make("li", is_mine ? "own-channel" : "");
         var icon = make("span", "icon", _channel_icon(ch));
+        var vis  = make("span", "channel-visibility", ch.public ? "🌐" : "🔒");
+        vis.title = ch.public ? "Public channel" : "Private channel";
         var link = make("a", null, ch.name);
         link.href = "#";
         link.addEventListener("click", function (e) {
@@ -2068,6 +2132,7 @@ function load_channel() {
             open_channel(ch.id, null);
         });
         li.appendChild(icon);
+        li.appendChild(vis);
         li.appendChild(link);
         var creator_label = is_mine ? "jij" : (ch.created_by_name || "");
         if (creator_label) li.appendChild(make("span", "channel-creator", creator_label));

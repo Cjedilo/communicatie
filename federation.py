@@ -48,6 +48,23 @@ def _detect_outbound_address() -> str:
     return f"wss://{ip}:{config.PORT}{config.BASE_PATH}"
 
 
+async def _channel_owner_info(channel: dict) -> dict | None:
+    """Describe a local channel's creator to a remote peer, so a denied
+    visitor/sender can be pointed at who to ask for access."""
+    if not channel.get("created_by"):
+        return None
+    owner = await db.user_by_id(channel["created_by"])
+    if not owner:
+        return None
+    base_url = (await db.setting_get("peer_address") or _detect_outbound_address()) \
+                .replace("wss://", "https://").replace("ws://", "http://")
+    return {
+        "id":     owner["id"],
+        "name":   owner.get("display_name") or owner["name"],
+        "avatar": (f"{base_url}/img/{owner['avatar']}" if owner.get("avatar") else None),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Shared HTTP/WS client session (reuses connections)
 # ---------------------------------------------------------------------------
@@ -622,8 +639,10 @@ async def send_message_to_peer(
     parent_id: uuid.UUID | None = None,
     text: str | None = None,
     has_image: bool = False,
-) -> bool:
-    """Send a new message notification to the channel's server."""
+) -> tuple[bool, dict]:
+    """Send a new message notification to the channel's server.
+    Returns (ok, info) — on rejection info carries the server's reason and,
+    for a membership denial, the channel/owner so the sender can ask for access."""
     try:
         resp = await _session(peer).request({
             "type":           "new_message",
@@ -638,10 +657,16 @@ async def send_message_to_peer(
             "text":           text,
             "has_image":      has_image,
         }, timeout=10)
-        return resp.get("ok", False)
+        if resp.get("ok"):
+            return True, {}
+        return False, {
+            "reason":  resp.get("reason"),
+            "channel": resp.get("channel"),
+            "owner":   resp.get("owner"),
+        }
     except Exception as e:
         log.warning("Failed to send message to peer %s: %s %r", peer["address"], type(e).__name__, e)
-        return False
+        return False, {"reason": "Could not reach that server"}
 
 
 async def get_peer_user_messages(peer: dict, user_id: uuid.UUID) -> list[dict]:
@@ -826,17 +851,7 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     elif peer_record:
                         authorised = await db.peer_has_member_in_channel(cid, peer_record["id"])
                     if not authorised:
-                        owner_info = None
-                        if channel.get("created_by"):
-                            owner = await db.user_by_id(channel["created_by"])
-                            if owner:
-                                base_url = (await db.setting_get("peer_address") or _detect_outbound_address()) \
-                                            .replace("wss://", "https://").replace("ws://", "http://")
-                                owner_info = {
-                                    "id":     owner["id"],
-                                    "name":   owner.get("display_name") or owner["name"],
-                                    "avatar": (f"{base_url}/img/{owner['avatar']}" if owner.get("avatar") else None),
-                                }
+                        owner_info = await _channel_owner_info(channel)
                         await ws.send_str(_dumps(_err("read_channel", "Not authorised",
                             channel={"id": channel["id"], "name": channel["name"],
                                      "public": bool(channel["public"])},
@@ -858,9 +873,15 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     av = m.get("sender_avatar")
                     if av and not str(av).startswith("http"):
                         m["sender_avatar"] = f"{base_url}/img/{av}"
+                creator_name = None
+                if channel.get("created_by"):
+                    creator = await db.user_by_id(channel["created_by"])
+                    if creator:
+                        creator_name = creator.get("display_name") or creator["name"]
                 await ws.send_str(_dumps(_ok("read_channel",
                     channel={"id": channel["id"], "name": channel["name"],
-                             "public": bool(channel["public"]), "icon": channel.get("icon")},
+                             "public": bool(channel["public"]), "icon": channel.get("icon"),
+                             "created_by_name": creator_name},
                     messages=messages)))
 
             # --- get_message: return content of a single message ---
@@ -932,7 +953,9 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
             elif msg_type == "new_message":
                 peer_record = await _authed_peer(data)
                 if not peer_record:
-                    await ws.send_str(_dumps(_err("new_message", "Not authorised")))
+                    # Server-to-server auth failure — not something the sending
+                    # user can fix, keep it distinct from a per-user access denial.
+                    await ws.send_str(_dumps(_err("new_message", "Peer authentication failed")))
                     continue
                 sender_address = peer_record["address"]
 
@@ -964,7 +987,9 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
                     if not channel["public"]:
                         if not peer_id_val or not await db.is_remote_member(cid, sender_user_id, peer_id_val):
-                            await ws.send_str(_dumps(_err("new_message", "Not authorised")))
+                            owner_info = await _channel_owner_info(channel)
+                            await ws.send_str(_dumps(_err("new_message", "Not a member of this channel",
+                                channel={"id": channel["id"], "name": channel["name"]}, owner=owner_info)))
                             continue
                     else:
                         if await db.is_banned(cid, sender_user_id, peer_id_val):

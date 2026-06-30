@@ -625,6 +625,24 @@ textarea#message_input:focus { outline: 2px solid var(--accent); }
 
 .item-list .icon { font-size: .85rem; color: var(--text-dim); }
 
+.channel-visibility {
+    font-size: .8rem;
+    opacity: .75;
+    margin-right: .3rem;
+}
+
+.chat-visibility {
+    font-size: .85rem;
+    opacity: .8;
+    margin-left: .25rem;
+}
+
+.chat-creator-tag {
+    font-size: .75rem;
+    font-weight: 400;
+    color: var(--text-dim);
+}
+
 .item-list .stream-toggle {
     margin-left: auto;
     cursor: pointer;
