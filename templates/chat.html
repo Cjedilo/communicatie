@@ -2,9 +2,56 @@
     <button id="back_btn" class="back-btn" title="Back">←</button>
     <span id="chat_icon" class="chat-icon"></span>
     <span id="chat_title" class="chat-title"></span>
+    <button id="fav_btn" class="secondary hidden" title="Add to favorites">☆</button>
     <button id="share_btn" class="secondary hidden" title="Copy link to this chat">📤</button>
+    <button id="edit_channel_btn" class="secondary hidden" title="Edit channel">✏️</button>
     <button id="members_btn" class="secondary hidden">Members</button>
     <button id="bans_btn" class="secondary hidden">Ban users</button>
+</div>
+<div id="chat_description" class="chat-description hidden"></div>
+
+<div id="new_channel_overlay" class="hidden overlay">
+    <div class="overlay-header">
+        <span id="new_channel_overlay_title">Edit channel</span>
+        <button type="button" id="close_new_channel" class="secondary">Cancel</button>
+    </div>
+    <form id="create_channel_form" class="new-channel-form">
+        <div class="new-channel-icon-row">
+            <span id="new_channel_icon" class="chat-icon" title="Choose icon">🗨️</span>
+            <input type="text" id="channel_name" placeholder="Channel name" maxlength="128" class="hidden">
+        </div>
+        <textarea id="channel_description" placeholder="Description (optional)" maxlength="512" rows="2"></textarea>
+        <label class="checkbox-label">
+            <input type="checkbox" id="channel_private"> Private
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="channel_allow_replies" checked> Allow replies/threading
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="channel_post_restricted"> Only moderators can post
+        </label>
+        <label class="checkbox-label checkbox-sublabel hidden" id="channel_restrict_replies_row">
+            <input type="checkbox" id="channel_restrict_replies" checked> Also restrict replies (off = anyone can reply to existing posts)
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="channel_allow_images" checked> Allow images
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="channel_allow_reactions" checked> Allow emoji reactions
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="channel_allow_markdown" checked> Render markdown
+        </label>
+        <label class="select-label">
+            Editing
+            <select id="channel_edit_mode">
+                <option value="off">Off — messages can't be edited</option>
+                <option value="history">On, with history — old text stays visible</option>
+                <option value="overwrite">On, silent — old text is replaced</option>
+            </select>
+        </label>
+        <button type="submit" id="channel_form_submit">Save</button>
+    </form>
 </div>
 
 <div id="member_manager" class="hidden overlay">
@@ -54,3 +101,4 @@
         <button id="send_btn">Send</button>
     </div>
 </div>
+<div id="post_restricted_notice" class="hidden post-restricted-notice">🔒 Only moderators can post in this channel</div>

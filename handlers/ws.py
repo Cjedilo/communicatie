@@ -52,8 +52,9 @@ def _rate_ok(user_id: uuid.UUID, limit: int) -> bool:
 # Active WebSocket connections per channel (for live push)
 # ---------------------------------------------------------------------------
 
-_channel_sockets: dict[uuid.UUID, set[web.WebSocketResponse]] = defaultdict(set)
-_stream_sockets:  set[web.WebSocketResponse] = set()
+_channel_sockets:      dict[uuid.UUID, set[web.WebSocketResponse]] = defaultdict(set)
+_stream_sockets:       set[web.WebSocketResponse] = set()
+_notification_sockets: set[web.WebSocketResponse] = set()  # every connected client WS
 
 
 def _subscribe_to_channel(channel_id: uuid.UUID, ws: web.WebSocketResponse):
@@ -68,6 +69,24 @@ def _unsubscribe_all(ws: web.WebSocketResponse):
     for sockets in _channel_sockets.values():
         sockets.discard(ws)
     _stream_sockets.discard(ws)
+    # _notification_sockets is NOT cleared here — it persists for the full
+    # connection lifetime and is only removed when the socket actually closes.
+
+
+async def push_notification(channel_id: uuid.UUID, peer_id: uuid.UUID | None = None,
+                             mentioned_user_ids: list | None = None):
+    """Lightweight push to every connected client so they can update unread badges."""
+    msg  = _dumps({"type": "new_message_notification", "ok": True,
+                   "channel_id": channel_id, "peer_id": peer_id,
+                   "mentions": [str(u) for u in (mentioned_user_ids or [])]})
+    dead = set()
+    for ws in list(_notification_sockets):
+        try:
+            await ws.send_str(msg)
+        except Exception:
+            dead.add(ws)
+    for ws in dead:
+        _notification_sockets.discard(ws)
 
 
 async def broadcast_to_channel(channel_id: uuid.UUID, payload: dict):
@@ -115,6 +134,14 @@ async def _check_channel_access(channel_id: uuid.UUID, user_id: uuid.UUID) -> tu
         if not await db.is_member(channel_id, user_id):
             return None, "Not a member of this private channel"
     return channel, None
+
+
+async def _can_manage_channel(channel: dict, user_id: uuid.UUID) -> bool:
+    """A channel's creator and its appointed moderators can manage it — the
+    server owner has no special rights over chats someone else made."""
+    if channel["created_by"] == user_id:
+        return True
+    return await db.is_channel_moderator(channel["id"], user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -188,19 +215,198 @@ async def _handle_toggle_stream_channel(data: dict, session: dict, ws: web.WebSo
     channel = await db.channel_by_id(cid)
     if not channel:
         return _err("toggle_stream_channel", "Channel not found")
-    owner_id   = await db.setting_get("owner_id")
-    is_owner   = str(session["user_id"]) == owner_id
-    is_creator = channel["created_by"] == session["user_id"]
-    if not is_owner and not is_creator:
+    if not await _can_manage_channel(channel, session["user_id"]):
         return _err("toggle_stream_channel", "Not authorised")
     new_val = not channel.get("stream_excluded", False)
     await db.channel_set_stream_excluded(cid, new_val)
     return _ok("toggle_stream_channel", channel_id=cid, stream_excluded=new_val)
 
 
+async def _forward_channel_setting(data: dict, session: dict, msg_type: str) -> dict | None:
+    """If data contains peer_id, forward the setting change to that peer.
+    Returns the handler result, or None to handle locally."""
+    peer_id = _str_uuid(data.get("peer_id"))
+    if not peer_id:
+        return None
+    peer = await db.peer_by_id(peer_id)
+    if not peer:
+        return _err(msg_type, "Unknown peer")
+    from federation import set_channel_setting_on_peer
+    kwargs = {k: v for k, v in data.items()
+              if k not in ("type", "peer_id", "channel_id", "request_id")}
+    ok, info = await set_channel_setting_on_peer(
+        peer, data.get("channel_id"), session["user_id"], msg_type, **kwargs)
+    if not ok:
+        return _err(msg_type, info.get("reason") or "Could not update channel on remote server")
+    return _ok(msg_type)
+
+
+async def _handle_set_channel_allow_replies(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_allow_replies")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_allow_replies", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_allow_replies", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_allow_replies", "Not authorised")
+    allow_replies = bool(data.get("allow_replies", True))
+    await db.channel_update_settings(cid, {"allow_replies": allow_replies})
+    return _ok("set_channel_allow_replies", channel_id=cid, allow_replies=allow_replies)
+
+
+async def _handle_set_channel_public(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_public")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_public", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_public", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_public", "Not authorised")
+    public = bool(data.get("public", True))
+    await db.channel_set_public(cid, public)
+    if not public and channel.get("created_by"):
+        # Switching to private must not lock the creator out of their own channel.
+        await db.member_add(cid, channel["created_by"])
+    return _ok("set_channel_public", channel_id=cid, public=public)
+
+
+async def _handle_set_channel_post_restricted(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_post_restricted")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_post_restricted", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_post_restricted", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_post_restricted", "Not authorised")
+    restricted = bool(data.get("post_restricted", False))
+    await db.channel_update_settings(cid, {"post_restricted": restricted})
+    return _ok("set_channel_post_restricted", channel_id=cid, post_restricted=restricted)
+
+
+async def _handle_set_channel_restrict_replies(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_restrict_replies")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_restrict_replies", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_restrict_replies", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_restrict_replies", "Not authorised")
+    restrict_replies = bool(data.get("restrict_replies", True))
+    await db.channel_update_settings(cid, {"restrict_replies": restrict_replies})
+    return _ok("set_channel_restrict_replies", channel_id=cid, restrict_replies=restrict_replies)
+
+
+async def _handle_set_channel_allow_images(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_allow_images")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_allow_images", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_allow_images", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_allow_images", "Not authorised")
+    allow_images = bool(data.get("allow_images", True))
+    await db.channel_update_settings(cid, {"allow_images": allow_images})
+    return _ok("set_channel_allow_images", channel_id=cid, allow_images=allow_images)
+
+
+async def _handle_set_channel_allow_markdown(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_allow_markdown")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_allow_markdown", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_allow_markdown", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_allow_markdown", "Not authorised")
+    allow_markdown = bool(data.get("allow_markdown", True))
+    await db.channel_update_settings(cid, {"allow_markdown": allow_markdown})
+    return _ok("set_channel_allow_markdown", channel_id=cid, allow_markdown=allow_markdown)
+
+
+async def _handle_set_channel_allow_reactions(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_allow_reactions")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_allow_reactions", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_allow_reactions", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_allow_reactions", "Not authorised")
+    allow_reactions = bool(data.get("allow_reactions", True))
+    await db.channel_update_settings(cid, {"allow_reactions": allow_reactions})
+    return _ok("set_channel_allow_reactions", channel_id=cid, allow_reactions=allow_reactions)
+
+
+async def _handle_set_channel_edit_mode(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_edit_mode")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_edit_mode", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_edit_mode", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_edit_mode", "Not authorised")
+    mode = data.get("edit_mode")
+    if mode not in ("off", "history", "overwrite"):
+        return _err("set_channel_edit_mode", "Invalid edit_mode")
+    await db.channel_update_settings(cid, {"edit_mode": mode})
+    return _ok("set_channel_edit_mode", channel_id=cid, edit_mode=mode)
+
+
+async def _handle_set_channel_description(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_description")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_description", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_description", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_description", "Not authorised")
+    description = str(data.get("description") or "").strip()[:512]
+    await db.channel_update_settings(cid, {"description": description})
+    return _ok("set_channel_description", channel_id=cid, description=description)
+
+
+async def _handle_mark_channel_read(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("mark_channel_read", "Missing channel_id")
+    await db.channel_mark_read(session["user_id"], cid)
+    return _ok("mark_channel_read")
+
+
 async def _handle_read_channels(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
     channels  = await db.channels_visible_to(session["user_id"])
     peer_list = await db.peers_all()
+
+    unread   = await db.channels_unread_counts(session["user_id"])
+    mentions = await db.mentions_unread_counts(session["user_id"])
+    for ch in channels:
+        ch["unread_count"]  = unread.get(str(ch["id"]), 0)
+        ch["mention_count"] = mentions.get(str(ch["id"]), 0)
 
     from federation import get_peer_channels
     remote = await asyncio.gather(*[get_peer_channels(p, session["user_id"]) for p in peer_list])
@@ -254,6 +460,8 @@ async def _handle_read_user(data: dict, session: dict, ws: web.WebSocketResponse
 
 
 async def _handle_set_channel_icon(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_icon")
+    if fwd is not None: return fwd
     cid  = _str_uuid(data.get("channel_id"))
     icon = _require_str(data, "icon", 8)
     if not cid:
@@ -261,9 +469,7 @@ async def _handle_set_channel_icon(data: dict, session: dict, ws: web.WebSocketR
     channel = await db.channel_by_id(cid)
     if not channel:
         return _err("set_channel_icon", "Channel not found")
-    owner_id = await db.setting_get("owner_id")
-    is_owner = str(session["user_id"]) == owner_id
-    if not is_owner and str(channel.get("created_by")) != str(session["user_id"]):
+    if not await _can_manage_channel(channel, session["user_id"]):
         return _err("set_channel_icon", "Not authorised")
     await db.channel_set_icon(cid, icon)
     return _ok("set_channel_icon", icon=icon)
@@ -355,13 +561,25 @@ async def _handle_start_chat(data: dict, session: dict, ws: web.WebSocketRespons
 
 
 async def _handle_create_channel(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
-    name   = _require_str(data, "name", 128)
-    public = bool(data.get("public", True))
-    icon   = _require_str(data, "icon", 8)
+    name            = _require_str(data, "name", 128)
+    public          = bool(data.get("public", True))
+    icon            = _require_str(data, "icon", 8)
+    allow_replies   = bool(data.get("allow_replies", True))
+    post_restricted = bool(data.get("post_restricted", False))
+    edit_mode       = data.get("edit_mode")
+    if edit_mode not in ("off", "history", "overwrite"):
+        edit_mode = "off"
+    description      = str(data.get("description") or "").strip()[:512]
+    allow_images     = bool(data.get("allow_images", True))
+    restrict_replies = bool(data.get("restrict_replies", True))
+    allow_reactions  = bool(data.get("allow_reactions", True))
+    allow_markdown   = bool(data.get("allow_markdown", True))
     if not name:
         return _err("create_channel", "Channel name required")
 
-    channel = await db.channel_create(name, public, session["user_id"], icon)
+    channel = await db.channel_create(name, public, session["user_id"], icon,
+                                       allow_replies, post_restricted, edit_mode, description,
+                                       allow_images, restrict_replies, allow_reactions, allow_markdown)
     if not public:
         # Creator is automatically a member of private channels
         await db.member_add(channel["id"], session["user_id"])
@@ -377,10 +595,9 @@ async def _handle_delete_channel(data: dict, session: dict, ws: web.WebSocketRes
     if not channel:
         return _err("delete_channel", "Channel not found")
 
-    owner_id = await db.setting_get("owner_id")
-    is_owner   = str(session["user_id"]) == owner_id
-    is_creator = channel["created_by"] == session["user_id"]
-    if not is_owner and not is_creator:
+    # Deletion is destructive enough that it stays creator-only — even
+    # moderators don't get it, and the server owner has no override.
+    if channel["created_by"] != session["user_id"]:
         return _err("delete_channel", "Not authorised")
 
     await db.channel_delete(cid)
@@ -424,6 +641,9 @@ async def _handle_read_channel(data: dict, session: dict, ws: web.WebSocketRespo
         creator = await db.user_by_id(channel["created_by"])
         if creator:
             channel["created_by_name"] = creator.get("display_name") or creator["name"]
+
+    channel["can_manage"]    = await _can_manage_channel(channel, session["user_id"])
+    channel["poster_count"]  = await db.channel_poster_count(cid)
 
     _subscribe_to_channel(cid, ws)
     messages = await db.messages_for_channel(cid)
@@ -485,8 +705,30 @@ async def _handle_message(data: dict, session: dict, ws: web.WebSocketResponse) 
         if channel["public"] and await db.is_banned(cid, session["user_id"]):
             return _err("message", "You are banned from this channel")
 
+        if parent and not channel.get("allow_replies", True):
+            return _err("message", "Replies are turned off in this channel")
+
+        # post_restricted always gates top-level posts; replies are only
+        # gated too when the channel's restrict_replies sub-option is on.
+        restricted = channel.get("post_restricted") and (not parent or channel.get("restrict_replies", True))
+        if restricted and not await _can_manage_channel(channel, session["user_id"]):
+            return _err("message", "Only moderators can post in this channel")
+
+        if image and not channel.get("allow_images", True):
+            return _err("message", "Images are turned off in this channel")
+
         await db.message_index_add(msg_id, cid, session["user_id"], None, parent, created)
         await db.message_content_add(msg_id, text, image)
+
+        # Detect and store @mentions for local users.
+        import re as _re
+        mentioned_names = list({m.lower() for m in _re.findall(r'@([\w]+)', text or "")})
+        mentioned_ids: list[uuid.UUID] = []
+        if mentioned_names:
+            matched = await db.users_by_names(mentioned_names)
+            mentioned_ids = [u["id"] for u in matched if u["id"] != session["user_id"]]
+            if mentioned_ids:
+                await db.message_mentions_store(msg_id, mentioned_ids)
 
         payload = _ok("message", message={
             "id":             msg_id,
@@ -513,7 +755,9 @@ async def _handle_message(data: dict, session: dict, ws: web.WebSocketResponse) 
             cid, msg_id, session["user_id"], created,
             sender_name=user["name"] or "",
             sender_avatar=user["avatar"],
+            parent_id=parent,
         ))
+        await push_notification(cid, mentioned_user_ids=mentioned_ids)
         return payload
 
     return _ok("message", message={
@@ -530,6 +774,211 @@ async def _handle_message(data: dict, session: dict, ws: web.WebSocketResponse) 
     })
 
 
+async def _handle_edit_message(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    mid     = _str_uuid(data.get("id"))
+    peer_id = _str_uuid(data.get("peer_id"))
+    text    = _require_str(data, "text", 4096)
+    image   = _require_str(data, "image", 512)
+
+    if not mid:
+        return _err("edit_message", "Missing id")
+    if not text and not image:
+        return _err("edit_message", "Message must have text or image")
+
+    if peer_id:
+        # The channel is hosted by a peer; we own this message's content
+        # (we're the original sender), the peer owns the index/edit_mode.
+        peer = await db.peer_by_id(peer_id)
+        if not peer:
+            return _err("edit_message", "Unknown peer")
+        local = await db.message_content_local(mid)
+        if local is None:
+            return _err("edit_message", "Not authorised")
+
+        from federation import edit_message_on_peer
+        ok, info = await edit_message_on_peer(peer, mid, session["user_id"], text, image)
+        if not ok:
+            return _err("edit_message", info.get("reason") or "Could not edit message on remote server")
+
+        if info.get("edit_mode") == "history":
+            await db.message_edit_history_add(mid, local.get("text"), local.get("image"), info["edited_at"])
+        await db.message_content_update(mid, text, image)
+        return _ok("edit_message", message={
+            "id": mid, "text": text, "image": image, "edited_at": info.get("edited_at"),
+        })
+
+    # ── Locally-hosted channel ──
+    msg = await db.message_by_id(mid)
+    if not msg:
+        return _err("edit_message", "Message not found")
+    if msg["sender_user_id"] != session["user_id"] or msg.get("sender_peer_id"):
+        return _err("edit_message", "Not authorised")
+
+    channel = await db.channel_by_id(msg["channel_id"])
+    if not channel:
+        return _err("edit_message", "Channel not found")
+    mode = channel.get("edit_mode", "off")
+    if mode == "off":
+        return _err("edit_message", "Editing is turned off in this channel")
+
+    edited_at = datetime.now(timezone.utc)
+    if mode == "history":
+        await db.message_edit_history_add(mid, msg.get("text"), msg.get("image"), edited_at)
+    await db.message_content_update(mid, text, image)
+    await db.message_index_set_edited(mid, edited_at)
+
+    bcast_msg = {
+        "id": mid, "channel_id": msg["channel_id"], "text": text, "image": image, "edited_at": edited_at,
+    }
+    await broadcast_to_channel(msg["channel_id"], {"type": "message_edited", "ok": True, "message": bcast_msg})
+    if not channel.get("stream_excluded"):
+        await push_to_stream({"type": "stream_message_edited", "ok": True, "message": {
+            **bcast_msg, "channel_name": channel["name"], "channel_public": channel["public"],
+        }})
+
+    from federation import notify_peers_of_edit
+    asyncio.create_task(notify_peers_of_edit(msg["channel_id"], mid, text, image, edited_at))
+
+    return _ok("edit_message", message=bcast_msg)
+
+
+async def _handle_delete_message(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    mid     = _str_uuid(data.get("id"))
+    peer_id = _str_uuid(data.get("peer_id"))
+    cid     = _str_uuid(data.get("channel_id"))
+    if not mid:
+        return _err("delete_message", "Missing id")
+
+    if peer_id:
+        # Local sender deleting their own message from a remote channel.
+        if not cid:
+            return _err("delete_message", "Missing channel_id")
+        peer = await db.peer_by_id(peer_id)
+        if not peer:
+            return _err("delete_message", "Unknown peer")
+        if not await db.message_content_local(mid):
+            return _err("delete_message", "Not authorised")
+        from federation import delete_message_on_peer
+        ok, info = await delete_message_on_peer(peer, cid, mid, session["user_id"])
+        if not ok:
+            return _err("delete_message", info.get("reason") or "Could not delete message on remote server")
+        await db.message_delete(mid)
+        return _ok("delete_message", id=mid)
+
+    msg = await db.message_by_id(mid)
+    if not msg:
+        return _err("delete_message", "Message not found")
+
+    channel = await db.channel_by_id(msg["channel_id"])
+    if not channel:
+        return _err("delete_message", "Channel not found")
+
+    is_own    = msg["sender_user_id"] == session["user_id"] and not msg.get("sender_peer_id")
+    can_manage = await _can_manage_channel(channel, session["user_id"])
+    if not is_own and not can_manage:
+        return _err("delete_message", "Not authorised")
+
+    await db.message_delete(mid)
+
+    payload = {"type": "message_deleted", "ok": True, "id": str(mid),
+               "channel_id": str(msg["channel_id"])}
+    await broadcast_to_channel(msg["channel_id"], payload)
+    if not channel.get("stream_excluded"):
+        await push_to_stream({**payload, "type": "stream_message_deleted"})
+
+    from federation import notify_peers_of_deletion
+    asyncio.create_task(notify_peers_of_deletion(msg["channel_id"], mid))
+    return _ok("delete_message", id=mid)
+
+
+async def _handle_toggle_reaction(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    mid     = _str_uuid(data.get("id"))
+    peer_id = _str_uuid(data.get("peer_id"))
+    emoji   = _require_str(data, "emoji", 16)
+    if not mid:
+        return _err("toggle_reaction", "Missing id")
+    if not emoji:
+        return _err("toggle_reaction", "Missing emoji")
+
+    if peer_id:
+        # Message lives in a channel hosted on another server — ask the host.
+        peer = await db.peer_by_id(peer_id)
+        if not peer:
+            return _err("toggle_reaction", "Unknown peer")
+        from federation import toggle_reaction_on_peer
+        ok, info = await toggle_reaction_on_peer(peer, data.get("channel_id"), mid, session["user_id"], emoji)
+        if not ok:
+            return _err("toggle_reaction", info.get("reason") or "Could not react on remote server")
+        return _ok("toggle_reaction", id=mid, reactions=info.get("reactions", []))
+
+    msg = await db.message_by_id(mid)
+    if not msg:
+        return _err("toggle_reaction", "Message not found")
+
+    channel, err = await _check_channel_access(msg["channel_id"], session["user_id"])
+    if err:
+        return _err("toggle_reaction", err)
+
+    if channel["public"] and await db.is_banned(channel["id"], session["user_id"]):
+        return _err("toggle_reaction", "You are banned from this channel")
+
+    if not channel.get("allow_reactions", True):
+        return _err("toggle_reaction", "Reactions are turned off in this channel")
+
+    await db.reaction_toggle(mid, session["user_id"], None, emoji)
+    reactions = await db.reactions_for_message(mid)
+
+    payload = {"type": "reaction_updated", "ok": True, "id": str(mid),
+               "channel_id": str(channel["id"]), "reactions": reactions}
+    await broadcast_to_channel(channel["id"], payload)
+
+    from federation import notify_peers_of_reaction
+    asyncio.create_task(notify_peers_of_reaction(channel["id"], mid, reactions))
+    return _ok("toggle_reaction", id=mid, reactions=reactions)
+
+
+async def _handle_read_message_history(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    mid = _str_uuid(data.get("id"))
+    if not mid:
+        return _err("read_message_history", "Missing id")
+    msg = await db.message_by_id(mid)
+    if not msg:
+        return _err("read_message_history", "Message not found")
+    channel, err = await _check_channel_access(msg["channel_id"], session["user_id"])
+    if err:
+        return _err("read_message_history", err)
+    history = await db.message_edit_history_for(mid)
+    return _ok("read_message_history", history=history)
+
+
+async def _handle_fetch_remote_message_history(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    msg_id       = _str_uuid(data.get("message_id"))
+    peer_id      = _str_uuid(data.get("peer_id"))
+    peer_address = _require_str(data, "peer_address", 256)
+
+    if not msg_id:
+        return _err("fetch_remote_message_history", "Missing message_id")
+
+    local = await db.message_content_local(msg_id)
+    if local is not None:
+        history = await db.message_edit_history_for(msg_id)
+        return _ok("fetch_remote_message_history", history=history)
+
+    peer = None
+    if peer_address:
+        peer = await db.peer_by_address(peer_address)
+    if not peer and peer_id:
+        peer = await db.peer_by_id(peer_id)
+    if not peer:
+        return _err("fetch_remote_message_history", "Unknown peer")
+
+    from federation import fetch_message_history
+    history = await fetch_message_history(peer, msg_id)
+    if history is None:
+        return _err("fetch_remote_message_history", "Unavailable")
+    return _ok("fetch_remote_message_history", history=history)
+
+
 async def _handle_read_members(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
     cid = _str_uuid(data.get("channel_id"))
     if not cid:
@@ -539,9 +988,8 @@ async def _handle_read_members(data: dict, session: dict, ws: web.WebSocketRespo
     if not channel:
         return _err("read_members", "Channel not found")
 
-    # Only the channel's own creator can manage its membership — being the
-    # server owner grants no special rights over chats someone else made.
-    can_manage = channel["created_by"] == session["user_id"]
+    is_creator = channel["created_by"] == session["user_id"]
+    can_manage = is_creator or await _can_manage_channel(channel, session["user_id"])
     if not can_manage and not await db.is_member(cid, session["user_id"]):
         return _err("read_members", "Not authorised")
 
@@ -556,7 +1004,16 @@ async def _handle_read_members(data: dict, session: dict, ws: web.WebSocketRespo
 
     if not can_manage:
         # Read-only viewers don't need the "not members" list — that's an editing affordance.
-        return _ok("read_members", members=members, non_members=[], can_manage=False)
+        return _ok("read_members", members=members, non_members=[], can_manage=False, is_creator=False)
+
+    if channel["public"]:
+        # Public channels: everyone can read/post already, so member-add/remove is meaningless.
+        # Return all local users annotated with moderator status for the creator to manage.
+        all_users = await db.users_with_moderator_status(cid)
+        for u in all_users:
+            u["id"] = u["id"] if "id" in u else u.get("user_id")
+        return _ok("read_members", members=all_users, non_members=[], can_manage=True,
+                   is_creator=is_creator, is_public=True)
 
     member_ids = {
         (str(m["user_id"]), str(m["peer_id"]) if m.get("peer_id") else None)
@@ -577,7 +1034,7 @@ async def _handle_read_members(data: dict, session: dict, ws: web.WebSocketRespo
         if (str(u["id"]), str(u["peer_id"]) if u.get("peer_id") else None) not in member_ids
     ]
 
-    return _ok("read_members", members=members, non_members=non_members, can_manage=True)
+    return _ok("read_members", members=members, non_members=non_members, can_manage=True, is_creator=is_creator)
 
 
 async def _handle_set_member(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
@@ -593,9 +1050,7 @@ async def _handle_set_member(data: dict, session: dict, ws: web.WebSocketRespons
     if not channel:
         return _err("set_member", "Channel not found")
 
-    # Only the channel's own creator can manage its membership — being the
-    # server owner grants no special rights over chats someone else made.
-    if channel["created_by"] != session["user_id"]:
+    if not await _can_manage_channel(channel, session["user_id"]):
         return _err("set_member", "Not authorised")
 
     if is_member:
@@ -612,6 +1067,35 @@ async def _handle_set_member(data: dict, session: dict, ws: web.WebSocketRespons
     return _ok("set_member", channel_id=cid, user_id=uid, peer_id=pid, is_member=is_member)
 
 
+async def _handle_set_moderator(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    cid    = _str_uuid(data.get("channel_id"))
+    uid    = _str_uuid(data.get("user_id"))
+    is_mod = bool(data.get("is_moderator", True))
+
+    if not cid or not uid:
+        return _err("set_moderator", "Missing channel_id or user_id")
+
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_moderator", "Channel not found")
+
+    # Only the channel's actual creator appoints/revokes moderators —
+    # moderators can't create more moderators.
+    if channel["created_by"] != session["user_id"]:
+        return _err("set_moderator", "Not authorised")
+
+    if not channel["public"] and not await db.is_member(cid, uid):
+        return _err("set_moderator", "User must be a member first")
+
+    # Ensure a channel_members row exists before setting the flag — needed for
+    # public channels where users aren't added explicitly as members.
+    if is_mod:
+        await db.member_add(cid, uid)
+
+    await db.member_set_moderator(cid, uid, is_mod)
+    return _ok("set_moderator", channel_id=cid, user_id=uid, is_moderator=is_mod)
+
+
 async def _handle_read_bans(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
     cid = _str_uuid(data.get("channel_id"))
     if not cid:
@@ -619,9 +1103,7 @@ async def _handle_read_bans(data: dict, session: dict, ws: web.WebSocketResponse
     channel = await db.channel_by_id(cid)
     if not channel:
         return _err("read_bans", "Channel not found")
-    # Only the channel's own creator can manage bans — being the server
-    # owner grants no special rights over chats someone else made.
-    can_manage = channel["created_by"] == session["user_id"]
+    can_manage = await _can_manage_channel(channel, session["user_id"])
 
     banned = await db.channel_bans_for(cid)
 
@@ -651,9 +1133,7 @@ async def _handle_set_ban(data: dict, session: dict, ws: web.WebSocketResponse) 
     channel = await db.channel_by_id(cid)
     if not channel:
         return _err("set_ban", "Channel not found")
-    # Only the channel's own creator can manage bans — being the server
-    # owner grants no special rights over chats someone else made.
-    if channel["created_by"] != session["user_id"]:
+    if not await _can_manage_channel(channel, session["user_id"]):
         return _err("set_ban", "Not authorised")
     if blocked:
         await db.channel_ban_add(cid, uid, pid)
@@ -1358,6 +1838,15 @@ _HANDLERS = {
     "logout":           _handle_logout,
     "read_stream":           _handle_read_stream,
     "toggle_stream_channel": _handle_toggle_stream_channel,
+    "set_channel_allow_replies":   _handle_set_channel_allow_replies,
+    "set_channel_public":          _handle_set_channel_public,
+    "set_channel_post_restricted": _handle_set_channel_post_restricted,
+    "set_channel_restrict_replies": _handle_set_channel_restrict_replies,
+    "set_channel_allow_images":    _handle_set_channel_allow_images,
+    "set_channel_allow_reactions": _handle_set_channel_allow_reactions,
+    "set_channel_allow_markdown":  _handle_set_channel_allow_markdown,
+    "set_channel_edit_mode":       _handle_set_channel_edit_mode,
+    "set_channel_description":     _handle_set_channel_description,
     "read_channels":    _handle_read_channels,
     "read_users":       _handle_read_users,
     "read_user_messages":    _handle_read_user_messages,
@@ -1375,6 +1864,7 @@ _HANDLERS = {
     "message":          _handle_message,
     "read_members":     _handle_read_members,
     "set_member":       _handle_set_member,
+    "set_moderator":    _handle_set_moderator,
     "read_bans":      _handle_read_bans,
     "set_ban":        _handle_set_ban,
     "subscribe":        _handle_subscribe,
@@ -1401,6 +1891,12 @@ _HANDLERS = {
     "add_peer":         _handle_add_peer,
     "delete_peer":           _handle_delete_peer,
     "fetch_remote_message":  _handle_fetch_remote_message,
+    "edit_message":              _handle_edit_message,
+    "delete_message":            _handle_delete_message,
+    "toggle_reaction":           _handle_toggle_reaction,
+    "mark_channel_read":         _handle_mark_channel_read,
+    "read_message_history":      _handle_read_message_history,
+    "fetch_remote_message_history": _handle_fetch_remote_message_history,
     "resolve_channel_link":  _handle_resolve_channel_link,
 }
 
@@ -1424,6 +1920,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     session["_token"] = request.cookies.get(config.SESSION_COOKIE)
 
     log.info("WS connected: user=%s", session["name"])
+    _notification_sockets.add(ws)
 
     try:
         async for msg in ws:

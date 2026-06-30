@@ -12,6 +12,14 @@ var communicatie = (function () {
 
     var current_channel_id   = null;
     var current_channel_peer = null;
+    var current_channel_allow_replies    = true;
+    var current_channel_edit_mode        = "off";
+    var current_channel_post_restricted  = false;
+    var current_channel_restrict_replies = true;
+    var current_channel_allow_images     = true;
+    var current_channel_allow_reactions  = true;
+    var current_channel_allow_markdown   = true;
+    var current_channel_can_manage       = false;
     var _chat_origin         = "stream"; // nav page to return to on back
     var pending_parent_id    = null;
     var pending_image        = null;
@@ -28,10 +36,75 @@ var communicatie = (function () {
     var _stream_muted      = new Set(); // private remote channels opted OUT
     var _stream_subscribed = new Set(); // public  remote channels opted IN
     var _blocked_users     = new Set(); // "user_id|peer_id" — never show messages from these users
+    var _favorite_channels = new Set(); // "channel_id|peer_id" — starred channels
+    var _unread = {};                   // "channel_id|peer_id" → unread count (int)
+    var _mention_count    = 0;          // total unread mentions across all channels
+    var _channel_mentions = {};         // "channel_id|peer_id" → mention count for badge math
+    var _on_stream_page = false;        // true while stream page is visible
 
     function _save_stream_muted()      { send("set_user_setting", { key: "stream_muted",      value: Array.from(_stream_muted) }); }
     function _save_stream_subscribed() { send("set_user_setting", { key: "stream_subscribed", value: Array.from(_stream_subscribed) }); }
     function _save_blocked_users()     { send("set_user_setting", { key: "blocked_users",     value: Array.from(_blocked_users) }); }
+    function _save_favorites()         { send("set_user_setting", { key: "favorite_channels", value: Array.from(_favorite_channels) }); }
+
+    function _fav_key(channel_id, peer_id) { return (channel_id || "") + "|" + (peer_id || ""); }
+
+    function _chan_key(channel_id, peer_id) { return (channel_id || "") + "|" + (peer_id || ""); }
+
+    function _update_unread_badge() {
+        var total = 0;
+        Object.keys(_unread).forEach(function (k) { total += _unread[k] || 0; });
+        set_nav_badge("stream", total > 0 ? String(total) : "");
+    }
+
+    function _update_mention_badge() {
+        var show = _mention_count > 0;
+        ["mention_badge", "mention_badge_mobile"].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) el.classList.toggle("hidden", !show);
+        });
+    }
+
+    function _mark_read(channel_id, peer_id) {
+        var key = _chan_key(channel_id, peer_id);
+        if (_unread[key]) {
+            delete _unread[key];
+            _update_unread_badge();
+        }
+        if (_channel_mentions[key]) {
+            _mention_count = Math.max(0, _mention_count - _channel_mentions[key]);
+            delete _channel_mentions[key];
+            _update_mention_badge();
+        }
+        send("mark_channel_read", { channel_id: channel_id });
+    }
+
+    function _increment_unread(channel_id, peer_id) {
+        var key = _chan_key(channel_id, peer_id);
+        _unread[key] = (_unread[key] || 0) + 1;
+        _update_unread_badge();
+    }
+
+    var _fav_star_buttons = {}; // key -> [{el, on_label}] — kept in sync across list/header
+
+    function _register_fav_button(key, el) {
+        (_fav_star_buttons[key] = _fav_star_buttons[key] || []).push(el);
+    }
+
+    function _set_favorite(key, on) {
+        if (on) _favorite_channels.add(key);
+        else    _favorite_channels.delete(key);
+        _save_favorites();
+        // Drop refs to buttons no longer in the document (stale chat-header
+        // buttons from previously visited chats) while we're here.
+        var live = (_fav_star_buttons[key] || []).filter(function (el) { return document.contains(el); });
+        live.forEach(function (el) {
+            el.textContent = on ? "⭐" : "☆";
+            el.title = on ? "Remove from favorites" : "Add to favorites";
+        });
+        _fav_star_buttons[key] = live;
+        _render_favorites_section();
+    }
 
     function _block_key(user_id, peer_id) { return (user_id || "") + "|" + (peer_id || ""); }
     function _is_blocked(msg) { return _blocked_users.has(_block_key(msg.sender_user_id, msg.sender_peer_id)); }
@@ -85,6 +158,22 @@ var communicatie = (function () {
         var resolvers = _pending[data.type];
         if (resolvers && resolvers.length) resolvers.shift()(data);
         if (data.type === "message"        && data.ok) on_live_message(data.message);
+        if (data.type === "message_edited"  && data.ok) on_live_message_edited(data.message);
+        if (data.type === "message_deleted" && data.ok) on_live_message_deleted(data.id);
+        if (data.type === "reaction_updated" && data.ok) on_live_reaction_updated(data);
+        if (data.type === "new_message_notification" && data.ok) {
+            var nkey = _chan_key(data.channel_id, data.peer_id || null);
+            if (!_on_stream_page && nkey !== _chan_key(current_channel_id, current_channel_peer)) {
+                _increment_unread(data.channel_id, data.peer_id || null);
+            }
+            if ((data.mentions || []).indexOf(user_id) !== -1) {
+                if (!_on_stream_page && nkey !== _chan_key(current_channel_id, current_channel_peer)) {
+                    _mention_count++;
+                    _channel_mentions[nkey] = (_channel_mentions[nkey] || 0) + 1;
+                    _update_mention_badge();
+                }
+            }
+        }
         if (data.type === "stream_message" && data.ok) on_stream_message(data.message);
         if (data.type === "peer_added"      && data.ok) setup_stream_page();
         if (data.type === "stream_update"  && data.ok) {
@@ -153,6 +242,125 @@ function _channel_icon(ch) {
         }, 0);
     }
 
+    // Shared "new channel" / "edit channel" overlay — works on whichever page
+    // (channels.html or chat.html) currently has the #new_channel_overlay
+    // markup in the DOM. Pass an existing channel to edit it (name stays
+    // fixed — renaming was never an option), or omit it to create a new one.
+    function open_channel_settings(existing, on_saved) {
+        var overlay     = document.getElementById("new_channel_overlay");
+        var title_el    = document.getElementById("new_channel_overlay_title");
+        var close_btn   = document.getElementById("close_new_channel");
+        var name_input  = document.getElementById("channel_name");
+        var icon_el     = document.getElementById("new_channel_icon");
+        var desc_input    = document.getElementById("channel_description");
+        var private_cb    = document.getElementById("channel_private");
+        var replies_cb    = document.getElementById("channel_allow_replies");
+        var restricted_cb = document.getElementById("channel_post_restricted");
+        var restrict_replies_cb  = document.getElementById("channel_restrict_replies");
+        var restrict_replies_row = document.getElementById("channel_restrict_replies_row");
+        var images_cb     = document.getElementById("channel_allow_images");
+        var reactions_cb   = document.getElementById("channel_allow_reactions");
+        var markdown_cb    = document.getElementById("channel_allow_markdown");
+        var edit_mode_sel  = document.getElementById("channel_edit_mode");
+        var submit_btn    = document.getElementById("channel_form_submit");
+        var form          = document.getElementById("create_channel_form");
+        if (!overlay) return;
+
+        function _sync_restrict_replies_visibility() {
+            var relevant = restricted_cb.checked && replies_cb.checked;
+            restrict_replies_row.classList.toggle("hidden", !relevant);
+        }
+        restricted_cb.onchange = _sync_restrict_replies_visibility;
+        replies_cb.onchange    = _sync_restrict_replies_visibility;
+
+        var is_edit  = !!existing;
+        var icon_val = is_edit ? _channel_icon(existing) : "🗨️";
+
+        title_el.textContent   = is_edit ? "Edit channel — " + existing.name : "New channel";
+        submit_btn.textContent = is_edit ? "Save" : "Create";
+        name_input.classList.remove("hidden");
+        name_input.required = !is_edit;
+        name_input.readOnly = is_edit;
+        name_input.value    = is_edit ? existing.name : "";
+        desc_input.value     = is_edit ? (existing.description || "") : "";
+        private_cb.checked    = is_edit ? !existing.public : false;
+        replies_cb.checked    = is_edit ? (existing.allow_replies !== false && existing.allow_replies !== 0) : true;
+        restricted_cb.checked = is_edit ? !!existing.post_restricted : false;
+        restrict_replies_cb.checked = is_edit ? (existing.restrict_replies !== false && existing.restrict_replies !== 0) : true;
+        images_cb.checked     = is_edit ? (existing.allow_images !== false && existing.allow_images !== 0) : true;
+        reactions_cb.checked  = is_edit ? (existing.allow_reactions !== false && existing.allow_reactions !== 0) : true;
+        markdown_cb.checked   = is_edit ? (existing.allow_markdown  !== false && existing.allow_markdown  !== 0) : true;
+        edit_mode_sel.value   = is_edit ? (existing.edit_mode || "off") : "off";
+        icon_el.textContent = icon_val;
+        _sync_restrict_replies_visibility();
+
+        icon_el.onclick = function (e) {
+            e.stopPropagation();
+            _open_icon_picker(icon_el, function (em) {
+                icon_val = em;
+                icon_el.textContent = em;
+            });
+        };
+
+        overlay.classList.remove("hidden");
+        if (!is_edit) name_input.focus();
+
+        close_btn.onclick = function () { overlay.classList.add("hidden"); };
+
+        form.onsubmit = function (e) {
+            e.preventDefault();
+            var is_private       = private_cb.checked;
+            var allow_replies    = replies_cb.checked;
+            var post_restricted  = restricted_cb.checked;
+            var restrict_replies = restrict_replies_cb.checked;
+            var allow_images     = images_cb.checked;
+            var allow_reactions  = reactions_cb.checked;
+            var allow_markdown   = markdown_cb.checked;
+            var edit_mode        = edit_mode_sel.value;
+            var description      = desc_input.value.trim();
+
+            if (is_edit) {
+                Promise.all([
+                    request("set_channel_icon",          { channel_id: existing.id, peer_id: existing.peer_id || null, icon: icon_val }),
+                    request("set_channel_public",        { channel_id: existing.id, peer_id: existing.peer_id || null, public: !is_private }),
+                    request("set_channel_allow_replies",  { channel_id: existing.id, peer_id: existing.peer_id || null, allow_replies: allow_replies }),
+                    request("set_channel_post_restricted", { channel_id: existing.id, peer_id: existing.peer_id || null, post_restricted: post_restricted }),
+                    request("set_channel_restrict_replies", { channel_id: existing.id, peer_id: existing.peer_id || null, restrict_replies: restrict_replies }),
+                    request("set_channel_allow_images",    { channel_id: existing.id, peer_id: existing.peer_id || null, allow_images: allow_images }),
+                    request("set_channel_allow_reactions", { channel_id: existing.id, peer_id: existing.peer_id || null, allow_reactions: allow_reactions }),
+                    request("set_channel_allow_markdown",  { channel_id: existing.id, peer_id: existing.peer_id || null, allow_markdown: allow_markdown }),
+                    request("set_channel_edit_mode",       { channel_id: existing.id, peer_id: existing.peer_id || null, edit_mode: edit_mode }),
+                    request("set_channel_description",     { channel_id: existing.id, peer_id: existing.peer_id || null, description: description }),
+                ]).then(function (results) {
+                    var failed = results.find(function (r) { return !r.ok; });
+                    if (failed) { show_error(failed.reason); return; }
+                    overlay.classList.add("hidden");
+                    if (on_saved) on_saved({
+                        id: existing.id, icon: icon_val, public: !is_private,
+                        allow_replies: allow_replies, post_restricted: post_restricted,
+                        restrict_replies: restrict_replies, allow_images: allow_images,
+                        allow_reactions: allow_reactions, allow_markdown: allow_markdown,
+                        edit_mode: edit_mode, description: description,
+                    });
+                });
+            } else {
+                var name = name_input.value.trim();
+                if (!name) return;
+                request("create_channel", {
+                    name: name, public: !is_private, icon: icon_val,
+                    allow_replies: allow_replies, post_restricted: post_restricted,
+                    restrict_replies: restrict_replies, allow_images: allow_images,
+                    allow_reactions: allow_reactions, allow_markdown: allow_markdown,
+                    edit_mode: edit_mode, description: description,
+                }).then(function (d) {
+                    if (!d.ok) { show_error(d.reason); return; }
+                    overlay.classList.add("hidden");
+                    if (on_saved) on_saved(d.channel);
+                });
+            }
+        };
+    }
+
     function make(tag, cls, text) {
         var el = document.createElement(tag);
         if (cls)  el.className = cls;
@@ -160,12 +368,30 @@ function _channel_icon(ch) {
         return el;
     }
 
-    function avatar_img(src, cls) {
+    function _initial_avatar(name) {
+        var letter = ((name || "?")[0]).toUpperCase();
+        var h = 0;
+        var s = name || "?";
+        for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+        var hue = Math.abs(h) % 360;
+        var bg  = "hsl(" + hue + ",55%,42%)";
+        var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">'
+            + '<circle cx="20" cy="20" r="20" fill="' + bg + '"/>'
+            + '<text x="20" y="27" text-anchor="middle" font-family="system-ui,sans-serif"'
+            + ' font-size="19" font-weight="700" fill="white">' + letter + '</text>'
+            + '</svg>';
+        return "data:image/svg+xml," + encodeURIComponent(svg);
+    }
+
+    function avatar_img(src, cls, name) {
         var img = document.createElement("img");
         img.className = cls || "avatar";
-        img.src = src
+        var resolved = src
             ? (src.startsWith("http") || src.startsWith("/")) ? src : _bp + "/img/" + src
             : "";
+        var fallback = _initial_avatar(name || "?");
+        img.src = resolved || fallback;
+        img.onerror = function () { this.src = fallback; this.onerror = null; };
         img.alt = "";
         return img;
     }
@@ -276,6 +502,7 @@ function _channel_icon(ch) {
     }
 
     function exit_chat() {
+        _on_stream_page  = false;
         document.body.classList.remove("in-chat");
         current_channel_id   = null;
         current_channel_peer = null;
@@ -304,7 +531,25 @@ function _channel_icon(ch) {
                 if (Array.isArray(sub)) sub.forEach(function (k) { _stream_subscribed.add(k); });
                 var blocked = d.settings.blocked_users;
                 if (Array.isArray(blocked)) blocked.forEach(function (k) { _blocked_users.add(k); });
+                var favs = d.settings.favorite_channels;
+                if (Array.isArray(favs)) favs.forEach(function (k) { _favorite_channels.add(k); });
             });
+            // Populate _known_channels and initial unread counts at startup so
+            // new_message_notification badges work on any page, not just after
+            // visiting the channels list.
+            request("read_channels").then(function (d) {
+                if (!d.ok) return;
+                var mentions = 0;
+                d.channels.forEach(function (ch) {
+                    var key = _chan_key(ch.id, null);
+                    if (ch.unread_count  > 0) _unread[key] = ch.unread_count;
+                    if (ch.mention_count > 0) { _channel_mentions[key] = ch.mention_count; mentions += ch.mention_count; }
+                });
+                _mention_count = mentions;
+                _update_unread_badge();
+                _update_mention_badge();
+            });
+
             setup_nav();
             set_active_nav("stream");
             _check_nav_badges();
@@ -486,9 +731,7 @@ function _channel_icon(ch) {
         if (_is_blocked(msg)) return false;
         var key = _stream_muted_key(msg);
         if (!msg.peer_id) return true;            // local channel: server handles stream_excluded
-        return msg.channel_public
-            ? _stream_subscribed.has(key)         // public remote: must be opted in
-            : !_stream_muted.has(key);            // private remote: unless muted
+        return _stream_subscribed.has(key);       // remote: always opt-in (public or private)
     }
 
     function on_stream_message(msg) {
@@ -497,6 +740,8 @@ function _channel_icon(ch) {
             _stream_items.push({ t: new Date(msg.created), data: msg });
             render_stream(true); // live message appears at top → anchor existing content
         }
+        // Visible in stream → count as read so badge doesn't accumulate.
+        _mark_read(msg.channel_id, msg.peer_id || null);
     }
 
     function on_stream_update(messages) {
@@ -505,6 +750,7 @@ function _channel_icon(ch) {
         (messages || []).forEach(function (msg) {
             if (!_stream_visible(msg)) return;
             if (!seen.has(msg.id)) { seen.add(msg.id); _stream_items.push({ t: new Date(msg.created), data: msg }); added = true; }
+            _mark_read(msg.channel_id, msg.peer_id || null);
         });
         if (added) render_stream(); // items at bottom or initial → no scroll anchor
     }
@@ -537,6 +783,7 @@ function _channel_icon(ch) {
     }
 
     function setup_stream_page() {
+        _on_stream_page  = true;
         _stream_items    = [];
         _stream_has_more = false;
         _stream_loading  = false;
@@ -569,14 +816,9 @@ function _channel_icon(ch) {
                         }
                     });
                 } else {
-                    // Remote channel: toggle via subscribed/muted depending on public
-                    if (msg.channel_public) {
-                        _stream_subscribed.delete(mute_key);
-                        _save_stream_subscribed();
-                    } else {
-                        _stream_muted.add(mute_key);
-                        _save_stream_muted();
-                    }
+                    // Remote channel: all use _stream_subscribed (opt-in)
+                    _stream_subscribed.delete(mute_key);
+                    _save_stream_subscribed();
                     _stream_items = _stream_items.filter(function (i) { return _stream_visible(i.data); });
                     render_stream();
                 }
@@ -586,8 +828,11 @@ function _channel_icon(ch) {
         }
 
         var row = make("div", "stream-row");
+        var _sp = known_profiles[msg.sender_user_id] || {};
         row.appendChild(avatar_img(
-            msg.sender_avatar || (known_profiles[msg.sender_user_id] || {}).avatar
+            _sp.avatar || msg.sender_avatar,
+            null,
+            msg.sender_name || _sp.name || _sp.display_name
         ));
 
         var body = make("div", "stream-body");
@@ -608,8 +853,8 @@ function _channel_icon(ch) {
 
         var preview = make("div", "stream-preview");
         if (msg.text || msg.image) {
-            var txt = (msg.image && !msg.text) ? "📷 Image" : msg.text;
-            preview.appendChild(document.createTextNode(txt));
+            if (msg.image && !msg.text) { preview.appendChild(document.createTextNode("📷 Image")); }
+            else { preview.appendChild(render_markdown(msg.text)); }
         } else if (msg.id) {
             preview.appendChild(document.createTextNode("Loading…"));
             request("fetch_remote_message", {
@@ -620,9 +865,8 @@ function _channel_icon(ch) {
                 preview.replaceChildren();
                 if (d.ok && d.message && (d.message.text || d.message.image)) {
                     var m = d.message;
-                    preview.appendChild(document.createTextNode(
-                        (m.image && !m.text) ? "📷 Image" : m.text
-                    ));
+                    if (m.image && !m.text) { preview.appendChild(document.createTextNode("📷 Image")); }
+                    else { preview.appendChild(render_markdown(m.text)); }
                     msg.text  = m.text;
                     msg.image = m.image;
                 } else {
@@ -664,13 +908,33 @@ function _channel_icon(ch) {
 
     // ── Channel / chat ─────────────────────────────────────────────────
     function open_channel(channel_id, peer_id, scroll_to_id) {
+        _on_stream_page  = false;
+        _close_mention_popup();
+        _mention_users = null;  // refresh user list per channel
         var active = document.querySelector(".nav-item.active");
         _chat_origin = (active && active.dataset.page) || "stream";
         current_channel_id   = channel_id;
         current_channel_peer = peer_id || null;
+        current_channel_allow_replies    = true;
+        current_channel_edit_mode        = "off";
+        current_channel_post_restricted  = false;
+        current_channel_restrict_replies = true;
+        current_channel_allow_images     = true;
+        current_channel_allow_reactions  = true;
+        current_channel_allow_markdown   = true;
+        current_channel_can_manage       = false;
         pending_parent_id    = null;
         pending_image        = null;
         pending_scroll_id    = scroll_to_id || null;
+        _mark_read(channel_id, peer_id || null);
+        // Auto-subscribe remote channels to stream when opened — opening implies membership.
+        if (peer_id) {
+            var skey = _stream_muted_key({ channel_id: channel_id, peer_id: peer_id });
+            if (!_stream_subscribed.has(skey)) {
+                _stream_subscribed.add(skey);
+                _save_stream_subscribed();
+            }
+        }
 
         send("unsubscribe_all");
         document.body.classList.add("in-chat");
@@ -717,6 +981,122 @@ function _channel_icon(ch) {
             .catch(function () { show_error("Image upload failed"); });
     }
 
+    // ── @mention autocomplete ──────────────────────────────────────────
+    var _mention_users     = null;  // cached user list; null = not yet fetched
+    var _mention_popup_el  = null;  // active popup DOM element
+    var _mention_sel       = -1;    // keyboard-selected index
+    var _mention_query     = "";    // current partial name after @
+    var _mention_at_pos    = -1;    // caret position of the @ character
+
+    function _ensure_mention_users() {
+        if (_mention_users !== null) return;
+        _mention_users = [];
+        // Seed from profiles already seen in this session.
+        Object.keys(known_profiles).forEach(function (uid) {
+            var u = known_profiles[uid];
+            if (uid !== user_id) _mention_users.push(u);
+        });
+        // Fetch all local users for completeness (deduplicated by id).
+        request("read_users").then(function (d) {
+            if (!d.ok) return;
+            var seen = new Set(_mention_users.map(function (u) { return String(u.id); }));
+            (d.users || []).forEach(function (u) {
+                if (!seen.has(String(u.id)) && String(u.id) !== user_id) {
+                    _mention_users.push(u);
+                    seen.add(String(u.id));
+                }
+            });
+        });
+    }
+
+    function _mention_name(u) { return u.display_name || u.name || ""; }
+
+    function _close_mention_popup() {
+        if (_mention_popup_el) { _mention_popup_el.remove(); _mention_popup_el = null; }
+        _mention_sel   = -1;
+        _mention_query = "";
+        _mention_at_pos = -1;
+    }
+
+    function _open_mention_popup(textarea, query) {
+        _mention_query = query;
+        var q = query.toLowerCase();
+        var matches = (_mention_users || []).filter(function (u) {
+            var n = _mention_name(u).toLowerCase();
+            return n.startsWith(q);
+        }).slice(0, 6);
+
+        if (!matches.length) { _close_mention_popup(); return; }
+
+        if (!_mention_popup_el) {
+            _mention_popup_el = make("div", "mention-popup");
+            textarea.parentNode.insertBefore(_mention_popup_el, textarea);
+        }
+        _mention_popup_el.replaceChildren();
+        if (_mention_sel >= matches.length) _mention_sel = 0;
+
+        matches.forEach(function (u, idx) {
+            var li = make("div", "mention-item" + (idx === _mention_sel ? " sel" : ""), "@" + _mention_name(u));
+            li.addEventListener("mousedown", function (e) {
+                e.preventDefault();
+                _insert_mention(textarea, _mention_name(u));
+            });
+            _mention_popup_el.appendChild(li);
+        });
+    }
+
+    function _insert_mention(textarea, name) {
+        var val = textarea.value;
+        var before = val.slice(0, _mention_at_pos) + "@" + name + " ";
+        var after  = val.slice(textarea.selectionStart);
+        textarea.value = before + after;
+        var pos = before.length;
+        textarea.setSelectionRange(pos, pos);
+        _close_mention_popup();
+        textarea.focus();
+    }
+
+    function _on_mention_input(textarea) {
+        if (!current_channel_allow_markdown) { _close_mention_popup(); return; }
+        var caret = textarea.selectionStart;
+        var before = textarea.value.slice(0, caret);
+        var m = before.match(/@([\w]*)$/);
+        if (!m) { _close_mention_popup(); return; }
+        _mention_at_pos = caret - m[0].length;
+        _ensure_mention_users();
+        _open_mention_popup(textarea, m[1]);
+    }
+
+    function _on_mention_keydown(e, textarea) {
+        if (!_mention_popup_el) return false;
+        var items = _mention_popup_el.querySelectorAll(".mention-item");
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            _mention_sel = (_mention_sel + 1) % items.length;
+            items.forEach(function (el, i) { el.classList.toggle("sel", i === _mention_sel); });
+            return true;
+        }
+        if (e.key === "ArrowUp") {
+            e.preventDefault();
+            _mention_sel = (_mention_sel - 1 + items.length) % items.length;
+            items.forEach(function (el, i) { el.classList.toggle("sel", i === _mention_sel); });
+            return true;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+            if (_mention_sel >= 0 && _mention_sel < items.length) {
+                e.preventDefault();
+                var name = items[_mention_sel].textContent.slice(1); // strip leading @
+                _insert_mention(textarea, name);
+                return true;
+            }
+        }
+        if (e.key === "Escape") {
+            _close_mention_popup();
+            return true;
+        }
+        return false;
+    }
+
     function setup_chat_page() {
         document.getElementById("back_btn").addEventListener("click", function () {
             var dest = _chat_origin || "stream";
@@ -734,11 +1114,18 @@ function _channel_icon(ch) {
         });
 
         document.getElementById("send_btn").addEventListener("click", send_message);
-        document.getElementById("message_input").addEventListener("keydown", function (e) {
+        var inp = document.getElementById("message_input");
+        inp.addEventListener("input",   function ()  { _on_mention_input(inp); });
+        inp.addEventListener("keydown", function (e) {
+            if (_on_mention_keydown(e, inp)) return;
             if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send_message();
             }
+        });
+        inp.addEventListener("blur", function () {
+            // Delay so mousedown on popup items fires first.
+            setTimeout(_close_mention_popup, 150);
         });
     }
 
@@ -774,10 +1161,30 @@ function load_channel() {
                     title.appendChild(make("span", "chat-creator-tag",
                         " · Created by " + d.channel.created_by_name));
                 }
+                if (d.channel && d.channel.poster_count) {
+                    title.appendChild(make("span", "chat-creator-tag",
+                        " · " + d.channel.poster_count + " posters"));
+                }
             }
             if (chan_name) document.title = chan_name;
 
             var ch = d.channel || {};
+            ch.peer_id = current_channel_peer || null;
+            var desc_el = document.getElementById("chat_description");
+            if (desc_el) {
+                desc_el.replaceChildren(); if (ch.description) desc_el.appendChild(render_markdown(ch.description));
+                desc_el.classList.toggle("hidden", !ch.description);
+            }
+            current_channel_allow_replies    = ch.allow_replies !== false && ch.allow_replies !== 0;
+            current_channel_edit_mode        = ch.edit_mode || "off";
+            current_channel_post_restricted  = !!ch.post_restricted;
+            current_channel_restrict_replies = ch.restrict_replies !== false && ch.restrict_replies !== 0;
+            current_channel_allow_images     = ch.allow_images !== false && ch.allow_images !== 0;
+            current_channel_allow_reactions  = ch.allow_reactions !== false && ch.allow_reactions !== 0;
+            current_channel_allow_markdown   = ch.allow_markdown  !== false && ch.allow_markdown  !== 0;
+            current_channel_can_manage       = !!ch.can_manage;
+            _update_compose_visibility();
+            _apply_image_restriction();
 
             var share_btn = document.getElementById("share_btn");
             if (share_btn) {
@@ -790,24 +1197,7 @@ function load_channel() {
             }
 
             var icon_el = document.getElementById("chat_icon");
-            if (icon_el) {
-                icon_el.textContent = _channel_icon(ch);
-                var can_edit = is_owner || (ch.created_by && String(ch.created_by) === String(user_id));
-                if (can_edit) {
-                    icon_el.title = "Change icon";
-                    icon_el.style.cursor = "pointer";
-                    icon_el.addEventListener("click", function (e) {
-                        e.stopPropagation();
-                        _open_icon_picker(icon_el, function (em) {
-                            request("set_channel_icon", { channel_id: ch.id, icon: em }).then(function (r) {
-                                if (!r.ok) { show_error(r.reason); return; }
-                                ch.icon = em;
-                                icon_el.textContent = em;
-                            });
-                        });
-                    });
-                }
-            }
+            if (icon_el) icon_el.textContent = _channel_icon(ch);
 
             var container = document.getElementById("messages");
             container.replaceChildren();
@@ -833,9 +1223,7 @@ function load_channel() {
 
             request_profiles();
 
-            if (!d.remote) {
-                setup_chat_buttons(d.channel);
-            }
+            setup_chat_buttons(d.channel);
 
             if (_pending_message_draft) {
                 var input = document.getElementById("message_input");
@@ -845,23 +1233,112 @@ function load_channel() {
         });
     }
 
+    // Hides the message input for everyone except the channel's managers
+    // when the channel is in "only moderators can post" mode. If replies
+    // aren't also restricted, non-managers still get the input while
+    // composing a reply — just not for starting new top-level messages.
+    function _update_compose_visibility() {
+        var input_area = document.getElementById("input_area");
+        var notice      = document.getElementById("post_restricted_notice");
+        if (!input_area || !notice) return;
+
+        if (!current_channel_post_restricted || current_channel_can_manage) {
+            input_area.classList.remove("hidden");
+            notice.classList.add("hidden");
+            return;
+        }
+        if (current_channel_restrict_replies || !current_channel_allow_replies) {
+            input_area.classList.add("hidden");
+            notice.textContent = "🔒 Only moderators can post in this channel";
+            notice.classList.remove("hidden");
+            return;
+        }
+        var composing_reply = !!pending_parent_id;
+        input_area.classList.toggle("hidden", !composing_reply);
+        notice.textContent = "🔒 Only moderators can start new topics — reply to an existing message instead";
+        notice.classList.toggle("hidden", composing_reply);
+    }
+
+    function _apply_image_restriction() {
+        var dz = document.getElementById("drop_zone");
+        if (dz) dz.classList.toggle("hidden", !current_channel_allow_images);
+    }
+
     function setup_chat_buttons(channel) {
         var is_pub = channel && channel.public;
 
-        // Members button (private channels only)
+        // Favorite toggle
+        var fbtn = document.getElementById("fav_btn");
+        if (fbtn && channel) {
+            var cfkey = _fav_key(channel.id, current_channel_peer);
+            fbtn.classList.remove("hidden");
+            fbtn.textContent = _favorite_channels.has(cfkey) ? "⭐" : "☆";
+            fbtn.title = _favorite_channels.has(cfkey) ? "Remove from favorites" : "Add to favorites";
+            fbtn.addEventListener("click", function () { _set_favorite(cfkey, !_favorite_channels.has(cfkey)); });
+            _register_fav_button(cfkey, fbtn);
+        }
+
+        // Edit channel (icon / private / replies) — managers only
+        var ebtn = document.getElementById("edit_channel_btn");
+        if (ebtn && channel && channel.can_manage) {
+            ebtn.classList.remove("hidden");
+            ebtn.addEventListener("click", function () {
+                open_channel_settings(channel, function (updated) {
+                    channel.icon             = updated.icon;
+                    channel.public           = updated.public;
+                    channel.allow_replies    = updated.allow_replies;
+                    channel.post_restricted  = updated.post_restricted;
+                    channel.restrict_replies = updated.restrict_replies;
+                    channel.allow_images     = updated.allow_images;
+                    channel.allow_reactions  = updated.allow_reactions;
+                    channel.edit_mode        = updated.edit_mode;
+                    channel.description      = updated.description;
+                    current_channel_allow_replies    = updated.allow_replies;
+                    current_channel_edit_mode        = updated.edit_mode;
+                    current_channel_post_restricted  = updated.post_restricted;
+                    current_channel_restrict_replies = updated.restrict_replies;
+                    current_channel_allow_images     = updated.allow_images;
+                    channel.allow_reactions  = updated.allow_reactions;
+                    channel.allow_markdown   = updated.allow_markdown;
+                    current_channel_allow_reactions  = updated.allow_reactions;
+                    current_channel_allow_markdown   = updated.allow_markdown;
+                    _update_compose_visibility();
+                    _apply_image_restriction();
+                    var icon_el = document.getElementById("chat_icon");
+                    if (icon_el) icon_el.textContent = _channel_icon(channel);
+                    var vis_el = document.querySelector("#chat_title .chat-visibility");
+                    if (vis_el) {
+                        vis_el.textContent = channel.public ? " 🌐" : " 🔒";
+                        vis_el.title = channel.public ? "Public channel" : "Private channel";
+                    }
+                    var desc_el = document.getElementById("chat_description");
+                    if (desc_el) {
+                        desc_el.replaceChildren(); if (channel.description) desc_el.appendChild(render_markdown(channel.description));
+                        desc_el.classList.toggle("hidden", !channel.description);
+                    }
+                });
+            });
+        }
+
+        // Members button — private channels: full member management;
+        // public channels: moderator management only (for managers).
         var btn = document.getElementById("members_btn");
-        if (btn && !is_pub) {
+        var show_members_btn = !is_pub || (channel && channel.can_manage);
+        if (btn && show_members_btn) {
             btn.classList.remove("hidden");
+            btn.textContent = is_pub ? "Moderators" : "Members";
             btn.addEventListener("click", function () {
                 request("read_members", { channel_id: current_channel_id }).then(function (d) {
                     if (!d.ok) { show_error(d.reason); return; }
-                    if (d.can_manage) {
+                    if (d.can_manage && d.is_public) {
+                        open_moderator_manager(d.members, channel.name, d.is_creator);
+                    } else if (d.can_manage) {
                         // Reset drop handlers to member mode
                         document.getElementById("members_list").setAttribute(
                             "ondrop", "communicatie.drop_member(event, true)");
                         document.getElementById("non_members_list").setAttribute(
                             "ondrop", "communicatie.drop_member(event, false)");
-                        open_member_manager(d.members, d.non_members, channel.name);
+                        open_member_manager(d.members, d.non_members, channel.name, d.is_creator);
                     } else {
                         open_readonly_list("Members", d.members, channel.name);
                     }
@@ -904,9 +1381,13 @@ function load_channel() {
         var div = make("div", "message" + (is_reply ? " reply" : ""));
         div.dataset.id = msg.id;
         if (is_reply) div.dataset.parentId = msg.parent_id;
+        div._msg = msg;   // live reference so push updates can mutate it in place
 
+        var _profile_av = known_profiles[msg.sender_user_id] || {};
         var img = avatar_img(
-            msg.sender_avatar || (known_profiles[msg.sender_user_id] || {}).avatar
+            _profile_av.avatar || msg.sender_avatar,
+            null,
+            msg.sender_name || _profile_av.name || _profile_av.display_name
         );
         if (msg.sender_user_id && !known_profiles[msg.sender_user_id]) {
             needed_profiles.add(msg.sender_user_id);
@@ -926,20 +1407,71 @@ function load_channel() {
         var time = make("span", "time", fmt_time(msg.created));
         header.appendChild(sender);
         header.appendChild(time);
+
+        var edited_el = make("span", "edited-badge hidden", "(edited)");
+        if (current_channel_edit_mode === "history") {
+            edited_el.classList.add("clickable");
+            edited_el.title = "Click to view earlier versions";
+            edited_el.addEventListener("click", function () { toggle_message_history(msg, content_wrap); });
+        }
+        header.appendChild(edited_el);
         body.appendChild(header);
+
+        var content_wrap = make("div", "content");
+        body.appendChild(content_wrap);
 
         var needs_fetch = msg.text === null && msg.image === null;
         if (needs_fetch) {
-            body.appendChild(make("span", "unavailable", "Loading…"));
-            fetch_remote_content(msg, body);
+            content_wrap.appendChild(make("span", "unavailable", "Loading…"));
+            fetch_remote_content(msg, content_wrap);
         } else {
-            render_content(body, msg);
+            render_content(content_wrap, msg);
         }
+        if (msg.edited_at) edited_el.classList.remove("hidden");
+
+        var reactions_el = make("div", "reactions hidden");
+        body.appendChild(reactions_el);
+        render_reactions(msg, reactions_el);
 
         var actions = make("div", "actions");
-        var reply   = make("button", null, "↩ Reply");
-        reply.addEventListener("click", function () { start_reply(msg); });
-        actions.appendChild(reply);
+        var can_reply = current_channel_allow_replies && !(current_channel_post_restricted
+            && current_channel_restrict_replies && !current_channel_can_manage);
+        if (can_reply) {
+            var reply = make("button", null, "↩ Reply");
+            reply.addEventListener("click", function () { start_reply(msg); });
+            actions.appendChild(reply);
+        }
+        if (current_channel_allow_reactions) {
+            var react_btn = make("button", "react-btn", "🙂+");
+            react_btn.title = "Add reaction";
+            react_btn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                _open_icon_picker(react_btn, function (emoji) { toggle_reaction(msg, emoji); });
+            });
+            actions.appendChild(react_btn);
+        }
+        if (msg.sender_user_id === user_id && current_channel_edit_mode !== "off") {
+            var edit_btn = make("button", null, "✎ Edit");
+            edit_btn.addEventListener("click", function () { start_edit(msg, content_wrap, edited_el); });
+            actions.appendChild(edit_btn);
+        }
+        var can_delete = (msg.sender_user_id === user_id && !msg.sender_peer_id)
+            || current_channel_can_manage;
+        if (can_delete) {
+            var del_btn = make("button", "msg-delete", "✕");
+            del_btn.title = "Delete message";
+            del_btn.addEventListener("click", function () {
+                if (!confirm("Delete this message?")) return;
+                request("delete_message", {
+                    id:         msg.id,
+                    channel_id: current_channel_id,
+                    peer_id:    current_channel_peer || null,
+                }).then(function (d) {
+                    if (!d.ok) show_error(d.reason || "Could not delete message");
+                });
+            });
+            actions.appendChild(del_btn);
+        }
         body.appendChild(actions);
 
         div.appendChild(img);
@@ -963,8 +1495,131 @@ function load_channel() {
         container.appendChild(div);
     }
 
+    function render_reactions(msg, el) {
+        el.replaceChildren();
+        var reactions = msg.reactions || [];
+        el.classList.toggle("hidden", reactions.length === 0);
+        reactions.forEach(function (r) {
+            var mine = r.users.indexOf(user_id) !== -1;
+            var pill = make("span", "reaction-pill" + (mine ? " mine" : ""), r.emoji + " " + r.users.length);
+            pill.title = mine ? "Click to remove your reaction" : "Click to react";
+            pill.addEventListener("click", function () { toggle_reaction(msg, r.emoji); });
+            el.appendChild(pill);
+        });
+    }
+
+    function toggle_reaction(msg, emoji) {
+        request("toggle_reaction", {
+            id:         msg.id,
+            channel_id: current_channel_id,
+            peer_id:    current_channel_peer || null,
+            emoji:      emoji,
+        }).then(function (d) {
+            if (!d.ok) { show_error(d.reason || "Could not react"); return; }
+            msg.reactions = d.reactions;
+            var el = document.querySelector("[data-id='" + msg.id + "'] .reactions");
+            if (el) render_reactions(msg, el);
+        });
+    }
+
+    function on_live_reaction_updated(data) {
+        var el = document.querySelector("[data-id='" + data.id + "']");
+        if (!el || !el._msg) return;
+        el._msg.reactions = data.reactions;
+        var rel = el.querySelector(".reactions");
+        if (rel) render_reactions(el._msg, rel);
+    }
+
+    function _esc(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function _md_inline(s) {
+        var saved = [];
+        // protect inline code from further processing
+        s = s.replace(/`([^`]+)`/g, function (_, c) { saved.push('<code>' + c + '</code>'); return '\x00' + (saved.length - 1) + '\x00'; });
+        s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+        s = s.replace(/\*\*(.+?)\*\*/g,     '<strong>$1</strong>');
+        s = s.replace(/\*(.+?)\*/g,         '<em>$1</em>');
+        s = s.replace(/~~(.+?)~~/g,         '<del>$1</del>');
+        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+        s = s.replace(/(https?:\/\/[^\s<>"]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+        // Highlight @mentions of the current user (by login name and display name).
+        var own = (known_profiles[user_id] || {});
+        var own_names = [user_name, own.display_name, own.name].filter(Boolean);
+        own_names.forEach(function (n) {
+            var safe = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            s = s.replace(new RegExp('@(' + safe + ')\\b', 'gi'),
+                '<span class="mention-self">@$1</span>');
+        });
+        // Style all @mentions generically.
+        s = s.replace(/@([\w]+)/g, function (m, name) {
+            return '<span class="mention">@' + name + '</span>';
+        });
+        s = s.replace(/\x00(\d+)\x00/g, function (_, i) { return saved[+i]; });
+        return s;
+    }
+
+    function render_markdown(text) {
+        var el = document.createElement("div");
+        el.className = "md";
+        var s = _esc(text);
+
+        // fenced code blocks  ```lang\n...\n```
+        var blocks = [];
+        s = s.replace(/```[^\n]*\n?([\s\S]*?)```/g, function (_, code) {
+            blocks.push('<pre><code>' + code.replace(/\n$/, '') + '</code></pre>');
+            return '\x01' + (blocks.length - 1) + '\x01';
+        });
+
+        var lines = s.split('\n'), out = [], i = 0;
+        while (i < lines.length) {
+            var ln = lines[i];
+
+            // blockquote
+            if (ln.startsWith('&gt; ') || ln === '&gt;') {
+                var ql = [];
+                while (i < lines.length && (lines[i].startsWith('&gt; ') || lines[i] === '&gt;')) {
+                    ql.push(lines[i].replace(/^&gt; ?/, '')); i++;
+                }
+                out.push('<blockquote>' + ql.map(_md_inline).join('<br>') + '</blockquote>');
+                continue;
+            }
+            // headers
+            var hm = ln.match(/^(#{1,4}) (.*)/);
+            if (hm) { var lv = hm[1].length; out.push('<h' + lv + '>' + _md_inline(hm[2]) + '</h' + lv + '>'); i++; continue; }
+            // unordered list
+            if (/^[*\-] /.test(ln)) {
+                var ul = [];
+                while (i < lines.length && /^[*\-] /.test(lines[i])) { ul.push('<li>' + _md_inline(lines[i].slice(2)) + '</li>'); i++; }
+                out.push('<ul>' + ul.join('') + '</ul>');
+                continue;
+            }
+            // ordered list
+            if (/^\d+\. /.test(ln)) {
+                var ol = [];
+                while (i < lines.length && /^\d+\. /.test(lines[i])) { ol.push('<li>' + _md_inline(lines[i].replace(/^\d+\. /, '')) + '</li>'); i++; }
+                out.push('<ol>' + ol.join('') + '</ol>');
+                continue;
+            }
+            // blank line
+            if (ln.trim() === '') { out.push('<br>'); i++; continue; }
+            out.push('<p>' + _md_inline(ln) + '</p>');
+            i++;
+        }
+
+        var html = out.join('');
+        html = html.replace(/\x01(\d+)\x01/g, function (_, i) { return blocks[+i]; });
+        el.innerHTML = html;
+        return el;
+    }
+
     function render_content(body, msg) {
-        if (msg.text) body.appendChild(make("p", "text", msg.text));
+        if (msg.text) {
+            body.appendChild(current_channel_allow_markdown
+                ? render_markdown(msg.text)
+                : (function () { var p = make("p", "text"); p.innerHTML = _md_inline(_esc(msg.text)); return p; }()));
+        }
         if (msg.image) {
             var img = document.createElement("img");
             img.className = "attach";
@@ -984,6 +1639,8 @@ function load_channel() {
         }).then(function (d) {
             body.querySelector(".unavailable")?.remove();
             if (d.ok && d.message) {
+                msg.text  = d.message.text;
+                msg.image = d.message.image;
                 render_content(body, d.message);
             } else {
                 body.appendChild(make("span", "unavailable", "Message unavailable"));
@@ -991,8 +1648,90 @@ function load_channel() {
         });
     }
 
+    // Replaces a message's content with an inline textarea; Save sends the
+    // edit (routed through the channel's host if it's remote), Cancel just
+    // restores the previous content view.
+    function start_edit(msg, content_wrap, edited_el) {
+        if (content_wrap.parentNode.querySelector(".edit-form")) return;
+
+        var prev_children = Array.prototype.slice.call(content_wrap.children);
+        prev_children.forEach(function (c) { c.classList.add("hidden"); });
+
+        var form = make("div", "edit-form");
+        var textarea = document.createElement("textarea");
+        textarea.value = msg.text || "";
+        textarea.rows = 2;
+        form.appendChild(textarea);
+
+        var form_actions = make("div", "edit-form-actions");
+        var save   = make("button", null, "Save");
+        var cancel = make("button", "secondary", "Cancel");
+
+        function close_form() {
+            form.remove();
+            prev_children.forEach(function (c) { c.classList.remove("hidden"); });
+        }
+
+        save.addEventListener("click", function () {
+            var new_text = textarea.value.trim();
+            if (!new_text && !msg.image) return;
+            request("edit_message", {
+                id: msg.id, peer_id: current_channel_peer,
+                text: new_text || null, image: msg.image || null,
+            }).then(function (d) {
+                if (!d.ok) { show_error(d.reason); return; }
+                msg.text      = d.message.text;
+                msg.image     = d.message.image;
+                msg.edited_at = d.message.edited_at;
+                close_form();
+                content_wrap.replaceChildren();
+                render_content(content_wrap, msg);
+                if (edited_el) edited_el.classList.remove("hidden");
+            });
+        });
+        cancel.addEventListener("click", close_form);
+
+        form_actions.appendChild(save);
+        form_actions.appendChild(cancel);
+        form.appendChild(form_actions);
+        content_wrap.appendChild(form);
+        textarea.focus();
+    }
+
+    // Shows/hides the list of prior versions for an edited message. Routes
+    // to whichever server actually owns the content, same as content fetch.
+    function toggle_message_history(msg, content_wrap) {
+        var existing = content_wrap.parentNode.querySelector(".history-panel");
+        if (existing) { existing.remove(); return; }
+
+        var panel = make("div", "history-panel", "Loading…");
+        content_wrap.insertAdjacentElement("afterend", panel);
+
+        var is_remote = !!msg.sender_peer_id;
+        var req = is_remote
+            ? request("fetch_remote_message_history", {
+                  message_id: msg.id, peer_id: msg.sender_peer_id, peer_address: msg.peer_address || "",
+              })
+            : request("read_message_history", { id: msg.id });
+
+        req.then(function (d) {
+            panel.replaceChildren();
+            if (!d.ok || !d.history || !d.history.length) {
+                panel.appendChild(make("span", "unavailable", "No earlier versions available"));
+                return;
+            }
+            d.history.forEach(function (v) {
+                var entry = make("div", "history-entry");
+                entry.appendChild(make("span", "time", fmt_time(v.edited_at)));
+                entry.appendChild(make("p", "text", v.text || (v.image ? "📷 Image" : "(no text)")));
+                panel.appendChild(entry);
+            });
+        });
+    }
+
     function start_reply(msg) {
         pending_parent_id = msg.id;
+        _update_compose_visibility();
         var ctx = document.getElementById("reply_context");
         ctx.classList.remove("hidden");
         ctx.replaceChildren();
@@ -1003,6 +1742,7 @@ function load_channel() {
         cancel.addEventListener("click", function () {
             pending_parent_id = null;
             ctx.classList.add("hidden");
+            _update_compose_visibility();
         });
         ctx.appendChild(label);
         ctx.appendChild(cancel);
@@ -1043,16 +1783,41 @@ function load_channel() {
         document.getElementById("image_preview").classList.add("hidden");
         pending_parent_id = null;
         pending_image     = null;
+        _update_compose_visibility();
     }
 
     function on_live_message(msg) {
         var container = document.getElementById("messages");
-        if (!container) return;
         if (msg.channel_id !== current_channel_id) return;
+        if (!container) return;
         if (document.querySelector("[data-id='" + msg.id + "']")) return;
         append_message(container, msg);
         container.scrollTop = container.scrollHeight;
         request_profiles();
+    }
+
+    function on_live_message_edited(msg) {
+        var container = document.getElementById("messages");
+        if (!container) return;
+        var el = container.querySelector("[data-id='" + msg.id + "']");
+        if (!el || !el._msg) return;
+        el._msg.text      = msg.text;
+        el._msg.image     = msg.image;
+        el._msg.edited_at = msg.edited_at;
+        var content_wrap = el.querySelector(".content");
+        if (content_wrap) {
+            content_wrap.replaceChildren();
+            render_content(content_wrap, el._msg);
+        }
+        var badge = el.querySelector(".edited-badge");
+        if (badge) badge.classList.remove("hidden");
+    }
+
+    function on_live_message_deleted(id) {
+        var container = document.getElementById("messages");
+        if (!container) return;
+        var el = container.querySelector("[data-id='" + id + "']");
+        if (el) el.remove();
     }
 
     // ── Image drop ─────────────────────────────────────────────────────
@@ -1086,7 +1851,7 @@ function load_channel() {
         }
     }
 
-    function open_member_manager(members, non_members, chan_name) {
+    function open_member_manager(members, non_members, chan_name, is_creator) {
         document.getElementById("manager_title").textContent  =
             chan_name ? "Members — " + chan_name : "Members";
         document.getElementById("col_left_title").textContent = "Members";
@@ -1101,9 +1866,27 @@ function load_channel() {
         mlist.replaceChildren();
         nmlist.replaceChildren();
 
-        members.forEach(function (u)     { mlist.appendChild(member_item(u)); });
+        // Only the channel's actual creator can appoint/revoke moderators.
+        members.forEach(function (u)     { mlist.appendChild(member_item(u, true, is_creator)); });
         non_members.forEach(function (u) { nmlist.appendChild(member_item(u)); });
         _setup_manager_filters(mlist, nmlist);
+    }
+
+    // Single-column moderator picker for public channels.
+    function open_moderator_manager(users, chan_name, is_creator) {
+        document.getElementById("manager_title").textContent =
+            chan_name ? "Moderators — " + chan_name : "Moderators";
+        document.getElementById("col_left_title").textContent = "Users";
+        var right_col = document.getElementById("member_manager_right_col");
+        if (right_col) right_col.classList.add("hidden");
+        var mgr = document.getElementById("member_manager");
+        mgr.classList.remove("hidden");
+
+        var mlist = document.getElementById("members_list");
+        mlist.removeAttribute("ondrop");
+        mlist.replaceChildren();
+        users.forEach(function (u) { mlist.appendChild(member_item(u, false, is_creator)); });
+        _setup_manager_filters(mlist, mlist);
     }
 
     function open_ban_manager(blocked, not_banned, chan_name) {
@@ -1149,17 +1932,40 @@ function load_channel() {
         _setup_manager_filters(mlist, mlist);
     }
 
-    function member_item(user, draggable) {
+    function member_item(user, draggable, mod_toggle) {
         var li = make("li", "member-item");
         li.draggable      = draggable !== false;
         li.dataset.uid    = user.id;
         li.dataset.peerId = user.peer_id || "";
         var av = user.avatar;
         if (av && av.startsWith("http")) av = _bp + "/proxy_img?url=" + encodeURIComponent(av);
-        li.appendChild(avatar_img(av));
+        li.appendChild(avatar_img(av, null, user.name || user.display_name));
         var label = user.name || "?";
         if (user.peer_name) label += " @ " + user.peer_name;
         li.appendChild(make("span", null, label));
+
+        if (mod_toggle) {
+            var star = make("span", "mod-toggle", user.is_moderator ? "⭐" : "☆");
+            star.title = user.is_moderator ? "Moderator — click to revoke" : "Click to make moderator";
+            star.addEventListener("click", function (e) {
+                e.stopPropagation();
+                var next = !user.is_moderator;
+                request("set_moderator", {
+                    channel_id: current_channel_id, user_id: user.id, is_moderator: next,
+                }).then(function (d) {
+                    if (!d.ok) { show_error(d.reason); return; }
+                    user.is_moderator = next;
+                    star.textContent = next ? "⭐" : "☆";
+                    star.title = next ? "Moderator — click to revoke" : "Click to make moderator";
+                });
+            });
+            li.appendChild(star);
+        } else if (user.is_moderator) {
+            var badge = make("span", "mod-badge", "⭐");
+            badge.title = "Moderator";
+            li.appendChild(badge);
+        }
+
         li.addEventListener("dragstart", function (e) {
             e.dataTransfer.setData("uid",     user.id);
             e.dataTransfer.setData("peer_id", user.peer_id || "");
@@ -1190,7 +1996,14 @@ function load_channel() {
             var dest = make_member
                 ? document.getElementById("members_list")
                 : document.getElementById("non_members_list");
-            if (item && dest) dest.appendChild(item);
+            if (item) {
+                if (!make_member) {
+                    // Removing from the channel drops moderator status too — clear the stale UI.
+                    var star = item.querySelector(".mod-toggle, .mod-badge");
+                    if (star) star.remove();
+                }
+                if (dest) dest.appendChild(item);
+            }
         });
     }
 
@@ -1909,7 +2722,7 @@ function load_channel() {
         var td_ident = document.createElement("td");
         td_ident.className = "user-identity";
         td_ident.style.cursor = "pointer";
-        td_ident.appendChild(avatar_img(u.avatar));
+        td_ident.appendChild(avatar_img(u.avatar, null, u.display_name || u.name));
         td_ident.appendChild(make("span", null, u.name));
         td_ident.addEventListener("click", function () { open_user_profile(u); });
 
@@ -2008,6 +2821,46 @@ function load_channel() {
         });
     }
 
+    var _all_loaded_channels = []; // [{ch, host_address, peer_id}] — populated by setup_channels_page
+
+    function _render_favorites_section() {
+        var section = document.getElementById("favorites_section");
+        var flist   = document.getElementById("favorites_list");
+        if (!section || !flist) return;
+
+        var favs = _all_loaded_channels.filter(function (entry) {
+            return _favorite_channels.has(_fav_key(entry.ch.id, entry.peer_id || null));
+        });
+
+        section.classList.toggle("hidden", favs.length === 0);
+        flist.replaceChildren();
+        favs.forEach(function (entry) {
+            var ch  = entry.ch;
+            var key = _fav_key(ch.id, entry.peer_id || null);
+            var li   = make("li", "fav-item");
+            var icon = make("span", "icon", _channel_icon(ch));
+            var link = make("a", null, ch.name);
+            link.href = "#";
+            if (ch.description) link.title = ch.description;
+            link.addEventListener("click", function (e) {
+                e.preventDefault();
+                open_channel(ch.id, entry.peer_id || null);
+            });
+            li.appendChild(icon);
+            li.appendChild(link);
+
+            var trash = make("span", "trash", "✕");
+            trash.title = "Remove from favorites";
+            trash.addEventListener("click", function (e) {
+                e.stopPropagation();
+                _set_favorite(key, false);
+            });
+            li.appendChild(trash);
+
+            flist.appendChild(li);
+        });
+    }
+
     function setup_channels_page() {
         var link_btn  = document.getElementById("open_link_btn");
         var link_form = document.getElementById("open_link_form");
@@ -2035,9 +2888,23 @@ function load_channel() {
             if (!d.ok) return;
             _own_host_address = d.host_address;
 
+            _all_loaded_channels = [];
             var list = document.getElementById("channels_list");
             list.replaceChildren();
+
+            // Seed unread/mention counts from server-side read_state (local channels only).
+            var mentions = 0;
             d.channels.forEach(function (ch) {
+                var key = _chan_key(ch.id, null);
+                if (ch.unread_count  > 0) _unread[key] = ch.unread_count;
+                if (ch.mention_count > 0) { _channel_mentions[key] = ch.mention_count; mentions += ch.mention_count; }
+            });
+            _mention_count = mentions;
+            _update_unread_badge();
+            _update_mention_badge();
+
+            d.channels.forEach(function (ch) {
+                _all_loaded_channels.push({ ch: ch, host_address: d.host_address, peer_id: null });
                 list.appendChild(build_channel_item(list, ch, d.host_address));
             });
 
@@ -2073,6 +2940,18 @@ function load_channel() {
                         li.appendChild(vis);
                         li.appendChild(link);
 
+                        _all_loaded_channels.push({ ch: ch, host_address: peer.address, peer_id: peer.id });
+
+                        var rfkey    = _fav_key(ch.id, peer.id);
+                        var rfav_btn = make("span", "stream-toggle", _favorite_channels.has(rfkey) ? "⭐" : "☆");
+                        rfav_btn.title = _favorite_channels.has(rfkey) ? "Remove from favorites" : "Add to favorites";
+                        rfav_btn.addEventListener("click", function (e) {
+                            e.stopPropagation();
+                            _set_favorite(rfkey, !_favorite_channels.has(rfkey));
+                        });
+                        _register_fav_button(rfkey, rfav_btn);
+                        li.appendChild(rfav_btn);
+
                         var share = make("span", "stream-toggle", "📤");
                         share.title = "Copy link to this chat";
                         share.addEventListener("click", function (e) {
@@ -2082,22 +2961,16 @@ function load_channel() {
                         li.appendChild(share);
 
                         var mkey  = (ch.id || "") + "|" + (peer.id || "");
-                        // public: opt-in (show if subscribed); private: opt-out (hide if muted)
-                        var muted = ch.public ? !_stream_subscribed.has(mkey) : _stream_muted.has(mkey);
+                        // all remote channels: opt-in via _stream_subscribed
+                        var muted = !_stream_subscribed.has(mkey);
                         var mbtn  = make("span", "stream-toggle", muted ? "🔕" : "🔔");
                         mbtn.title = muted ? "Add to stream" : "Remove from stream";
                         mbtn.addEventListener("click", function (e) {
                             e.stopPropagation();
                             muted = !muted;
-                            if (ch.public) {
-                                if (muted) { _stream_subscribed.delete(mkey); }
-                                else       { _stream_subscribed.add(mkey); }
-                                _save_stream_subscribed();
-                            } else {
-                                if (muted) { _stream_muted.add(mkey); }
-                                else       { _stream_muted.delete(mkey); }
-                                _save_stream_muted();
-                            }
+                            if (muted) { _stream_subscribed.delete(mkey); }
+                            else       { _stream_subscribed.add(mkey); }
+                            _save_stream_subscribed();
                             mbtn.textContent = muted ? "🔕" : "🔔";
                             mbtn.title = muted ? "Add to stream" : "Remove from stream";
                         });
@@ -2111,49 +2984,14 @@ function load_channel() {
             }
 
             _setup_collapsible_filter(rlist, document.getElementById("remote_filter"));
+            _render_favorites_section();
         });
 
-        var new_btn      = document.getElementById("new_channel_btn");
-        var new_overlay  = document.getElementById("new_channel_overlay");
-        var new_close    = document.getElementById("close_new_channel");
-        var new_icon_el  = document.getElementById("new_channel_icon");
-        var default_icon = "🗨️";
-        var new_icon     = default_icon;
-
-        function reset_new_channel_form() {
-            document.getElementById("channel_name").value = "";
-            document.getElementById("channel_private").checked = false;
-            new_icon = default_icon;
-            new_icon_el.textContent = default_icon;
-        }
-
-        new_btn.addEventListener("click", function () {
-            reset_new_channel_form();
-            new_overlay.classList.remove("hidden");
-            document.getElementById("channel_name").focus();
-        });
-        new_close.addEventListener("click", function () {
-            new_overlay.classList.add("hidden");
-        });
-        new_icon_el.addEventListener("click", function (e) {
-            e.stopPropagation();
-            _open_icon_picker(new_icon_el, function (em) {
-                new_icon = em;
-                new_icon_el.textContent = em;
-            });
-        });
-
-        document.getElementById("create_channel_form").addEventListener("submit", function (e) {
-            e.preventDefault();
-            var name    = document.getElementById("channel_name").value.trim();
-            var private_ = document.getElementById("channel_private").checked;
-            if (!name) return;
-            request("create_channel", { name: name, public: !private_, icon: new_icon }).then(function (d) {
-                if (!d.ok) { show_error(d.reason); return; }
-                new_overlay.classList.add("hidden");
-                reset_new_channel_form();
+        document.getElementById("new_channel_btn").addEventListener("click", function () {
+            open_channel_settings(null, function (channel) {
+                _all_loaded_channels.push({ ch: channel, host_address: _own_host_address, peer_id: null });
                 var list = document.getElementById("channels_list");
-                list.appendChild(build_channel_item(list, d.channel, _own_host_address));
+                list.appendChild(build_channel_item(list, channel, _own_host_address));
             });
         });
     }
@@ -2166,6 +3004,9 @@ function load_channel() {
         vis.title = ch.public ? "Public channel" : "Private channel";
         var link = make("a", null, ch.name);
         link.href = "#";
+        if (ch.description) link.title = ch.description;
+        var poster_el = make("span", "channel-poster-count");
+        if (ch.poster_count) poster_el.textContent = ch.poster_count;
         link.addEventListener("click", function (e) {
             e.preventDefault();
             open_channel(ch.id, null);
@@ -2173,16 +3014,30 @@ function load_channel() {
         li.appendChild(icon);
         li.appendChild(vis);
         li.appendChild(link);
-        var creator_label = is_mine ? "jij" : (ch.created_by_name || "");
-        if (creator_label) li.appendChild(make("span", "channel-creator", creator_label));
+        li.appendChild(poster_el);
 
-        var share = make("span", "stream-toggle", "📤");
+        // Fixed-width slots so the same icon always lands in the same
+        // column across rows, even when a given row doesn't have it.
+        var actions = make("span", "channel-actions");
+
+        var creator_label = is_mine ? "jij" : (ch.created_by_name || "");
+        var creator_el = make("span", "channel-creator", creator_label);
+        actions.appendChild(creator_el);
+
+        var fkey    = _fav_key(ch.id, null);
+        var fav_btn = make("span", "stream-toggle action-slot", _favorite_channels.has(fkey) ? "⭐" : "☆");
+        fav_btn.title = _favorite_channels.has(fkey) ? "Remove from favorites" : "Add to favorites";
+        fav_btn.addEventListener("click", function () { _set_favorite(fkey, !_favorite_channels.has(fkey)); });
+        _register_fav_button(fkey, fav_btn);
+        actions.appendChild(fav_btn);
+
+        var share = make("span", "stream-toggle action-slot", "📤");
         share.title = "Copy link to this chat";
         share.addEventListener("click", function () { _copy_share_link(host_address, ch.id); });
-        li.appendChild(share);
+        actions.appendChild(share);
 
         var excluded = !!ch.stream_excluded;
-        var stream_btn = make("span", "stream-toggle", excluded ? "🔕" : "🔔");
+        var stream_btn = make("span", "stream-toggle action-slot", excluded ? "🔕" : "🔔");
         stream_btn.title = excluded ? "Add to stream" : "Remove from stream";
         stream_btn.addEventListener("click", function () {
             request("toggle_stream_channel", { channel_id: ch.id }).then(function (d) {
@@ -2192,10 +3047,38 @@ function load_channel() {
                 stream_btn.title = excluded ? "Add to stream" : "Remove from stream";
             });
         });
-        li.appendChild(stream_btn);
+        actions.appendChild(stream_btn);
 
-        if (is_owner || ch.created_by === user_id) {
-            var trash = make("span", "trash", "✕");
+        var edit_btn = make("span", "stream-toggle action-slot");
+        if (ch.can_manage) {
+            edit_btn.textContent = "✏️";
+            edit_btn.title = "Edit channel";
+            edit_btn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                open_channel_settings(ch, function (updated) {
+                    ch.icon             = updated.icon;
+                    ch.public           = updated.public;
+                    ch.allow_replies    = updated.allow_replies;
+                    ch.post_restricted  = updated.post_restricted;
+                    ch.restrict_replies = updated.restrict_replies;
+                    ch.allow_images     = updated.allow_images;
+                    ch.allow_reactions  = updated.allow_reactions;
+                    ch.edit_mode        = updated.edit_mode;
+                    ch.description      = updated.description;
+                    icon.textContent = _channel_icon(ch);
+                    vis.textContent  = ch.public ? "🌐" : "🔒";
+                    vis.title        = ch.public ? "Public channel" : "Private channel";
+                    link.title       = ch.description || "";
+                });
+            });
+        }
+        actions.appendChild(edit_btn);
+
+        // Deletion is destructive enough to stay creator-only — no moderator
+        // or server-owner override, matching the server-side check.
+        var trash = make("span", "trash action-slot");
+        if (ch.created_by === user_id) {
+            trash.textContent = "✕";
             trash.addEventListener("click", function () {
                 if (!confirm("Delete channel " + ch.name + "?")) return;
                 request("delete_channel", { id: ch.id }).then(function (d) {
@@ -2203,8 +3086,10 @@ function load_channel() {
                     else show_error(d.reason);
                 });
             });
-            li.appendChild(trash);
         }
+        actions.appendChild(trash);
+
+        li.appendChild(actions);
         return li;
     }
 

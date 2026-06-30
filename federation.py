@@ -557,6 +557,42 @@ async def get_remote_messages(peer: dict, channel_id: uuid.UUID, requesting_user
 # Outbound: notify peers about a new local message
 # ---------------------------------------------------------------------------
 
+async def _subscriber_recipients(channel_id: uuid.UUID, channel: dict | None,
+                                  peers: dict[str, dict]) -> set[str]:
+    """Per-channel subscribers + stream subscribers with access — the
+    fan-out audience for any push about a message in this channel."""
+    recipients = set(_peer_subscriptions.get(channel_id, []))
+    for addr in list(_stream_subscriptions):
+        if addr in recipients:
+            continue
+        if channel and not channel["public"]:
+            peer = peers.get(addr)
+            if not peer:
+                continue
+            if not await db.peer_has_member_in_channel(channel_id, peer["id"]):
+                continue
+        recipients.add(addr)
+    return recipients
+
+
+async def _fanout_to_peers(payload: str, recipients: set[str], peers: dict[str, dict]):
+    if not recipients:
+        return
+
+    async def _notify(address: str):
+        peer = peers.get(address)
+        if not peer:
+            _remove_peer_subscriptions(address)
+            return
+        try:
+            await _session(peer).request(json.loads(payload), timeout=config.PEER_CONNECT_TIMEOUT)
+        except Exception as e:
+            log.warning("Failed to notify peer %s: %s", address, e)
+            _remove_peer_subscriptions(address)
+
+    await asyncio.gather(*[_notify(addr) for addr in recipients], return_exceptions=True)
+
+
 async def notify_peers_of_message(
     channel_id: uuid.UUID,
     msg_id: uuid.UUID,
@@ -564,6 +600,7 @@ async def notify_peers_of_message(
     created: datetime,
     sender_name: str = "",
     sender_avatar: str | None = None,
+    parent_id: uuid.UUID | None = None,
 ):
     """
     Notify all peers subscribed to a channel that a new message exists.
@@ -589,38 +626,37 @@ async def notify_peers_of_message(
         "text":           msg_text,
         "has_image":      has_image,
         "created":        created,
+        "parent_id":      parent_id,
     })
 
-    peers = {p["address"]: p for p in await db.peers_all()}
+    peers      = {p["address"]: p for p in await db.peers_all()}
+    recipients = await _subscriber_recipients(channel_id, channel, peers)
+    await _fanout_to_peers(payload, recipients, peers)
 
-    # Build recipient set: per-channel subscribers + stream subscribers with access
-    recipients = set(_peer_subscriptions.get(channel_id, []))
-    for addr in list(_stream_subscriptions):
-        if addr in recipients:
-            continue
-        if channel and not channel["public"]:
-            peer = peers.get(addr)
-            if not peer:
-                continue
-            if not await db.peer_has_member_in_channel(channel_id, peer["id"]):
-                continue
-        recipients.add(addr)
 
-    if not recipients:
-        return
+async def notify_peers_of_edit(
+    channel_id: uuid.UUID,
+    msg_id: uuid.UUID,
+    text: str | None,
+    image: str | None,
+    edited_at: datetime,
+    exclude_peer: str | None = None,
+):
+    """Notify all peers subscribed to a channel that one of its messages was edited."""
+    channel = await db.channel_by_id(channel_id)
+    payload = _dumps({
+        "type":       "edit_message",
+        "channel_id": channel_id,
+        "message_id": msg_id,
+        "text":       text,
+        "has_image":  bool(image),
+        "edited_at":  edited_at,
+    })
 
-    async def _notify(address: str):
-        peer = peers.get(address)
-        if not peer:
-            _remove_peer_subscriptions(address)
-            return
-        try:
-            await _session(peer).request(json.loads(payload), timeout=config.PEER_CONNECT_TIMEOUT)
-        except Exception as e:
-            log.warning("Failed to notify peer %s: %s", address, e)
-            _remove_peer_subscriptions(address)
-
-    await asyncio.gather(*[_notify(addr) for addr in recipients], return_exceptions=True)
+    peers      = {p["address"]: p for p in await db.peers_all()}
+    recipients = await _subscriber_recipients(channel_id, channel, peers)
+    recipients.discard(exclude_peer)
+    await _fanout_to_peers(payload, recipients, peers)
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +729,134 @@ async def fetch_message_content(peer: dict, msg_id: uuid.UUID) -> dict | None:
         return resp.get("message") if resp.get("ok") else None
     except Exception as e:
         log.warning("Failed to fetch message %s from %s: %s", msg_id, peer["address"], e)
+        return None
+
+
+async def set_channel_setting_on_peer(peer: dict, channel_id: uuid.UUID,
+                                       sender_user_id: uuid.UUID,
+                                       setting_type: str, **kwargs) -> tuple[bool, dict]:
+    """Forward a channel-setting change to the channel's hosting peer."""
+    our_address = await db.setting_get("peer_address") or _detect_outbound_address()
+    try:
+        resp = await _session(peer).request({
+            "type":           setting_type,
+            "channel_id":     channel_id,
+            "sender_user_id": sender_user_id,
+            "from":           our_address,
+            **kwargs,
+        }, timeout=10)
+        if resp.get("ok"):
+            return True, resp
+        return False, {"reason": resp.get("reason")}
+    except Exception as e:
+        log.warning("Failed to set %s on peer %s: %s", setting_type, peer["address"], e)
+        return False, {"reason": "Could not reach that server"}
+
+
+async def notify_peers_of_deletion(channel_id: uuid.UUID, msg_id: uuid.UUID,
+                                    exclude_peer: str | None = None):
+    """Notify all peers subscribed to a channel that a message was deleted."""
+    channel = await db.channel_by_id(channel_id)
+    payload = _dumps({
+        "type":       "delete_message",
+        "channel_id": channel_id,
+        "message_id": msg_id,
+    })
+    peers      = {p["address"]: p for p in await db.peers_all()}
+    recipients = await _subscriber_recipients(channel_id, channel, peers)
+    recipients.discard(exclude_peer)
+    await _fanout_to_peers(payload, recipients, peers)
+
+
+async def delete_message_on_peer(peer: dict, channel_id: uuid.UUID, msg_id: uuid.UUID,
+                                  sender_user_id: uuid.UUID) -> tuple[bool, dict]:
+    """Ask the channel-hosting peer to delete a message we originally sent."""
+    our_address = await db.setting_get("peer_address") or _detect_outbound_address()
+    try:
+        resp = await _session(peer).request({
+            "type":           "delete_message",
+            "channel_id":     channel_id,
+            "message_id":     msg_id,
+            "sender_user_id": sender_user_id,
+            "from":           our_address,
+        }, timeout=10)
+        if resp.get("ok"):
+            return True, {}
+        return False, {"reason": resp.get("reason")}
+    except Exception as e:
+        log.warning("Failed to delete message on peer %s: %s %r", peer["address"], type(e).__name__, e)
+        return False, {"reason": "Could not reach that server"}
+
+
+async def notify_peers_of_reaction(channel_id: uuid.UUID, msg_id: uuid.UUID,
+                                    reactions: list[dict], exclude_peer: str | None = None):
+    """Notify all peers subscribed to a channel that a message's reactions changed."""
+    channel = await db.channel_by_id(channel_id)
+    payload = _dumps({
+        "type":       "toggle_reaction",
+        "channel_id": channel_id,
+        "message_id": msg_id,
+        "reactions":  reactions,
+    })
+    peers      = {p["address"]: p for p in await db.peers_all()}
+    recipients = await _subscriber_recipients(channel_id, channel, peers)
+    recipients.discard(exclude_peer)
+    await _fanout_to_peers(payload, recipients, peers)
+
+
+async def toggle_reaction_on_peer(peer: dict, channel_id: uuid.UUID, msg_id: uuid.UUID,
+                                   sender_user_id: uuid.UUID, emoji: str) -> tuple[bool, dict]:
+    """Ask the channel-hosting peer to toggle our reaction on a message."""
+    our_address = await db.setting_get("peer_address") or _detect_outbound_address()
+    try:
+        resp = await _session(peer).request({
+            "type":           "toggle_reaction",
+            "channel_id":     channel_id,
+            "message_id":     msg_id,
+            "sender_user_id": sender_user_id,
+            "emoji":          emoji,
+            "from":           our_address,
+        }, timeout=10)
+        if resp.get("ok"):
+            return True, {"reactions": resp.get("reactions", [])}
+        return False, {"reason": resp.get("reason")}
+    except Exception as e:
+        log.warning("Failed to toggle reaction on peer %s: %s %r", peer["address"], type(e).__name__, e)
+        return False, {"reason": "Could not reach that server"}
+
+
+async def edit_message_on_peer(peer: dict, msg_id: uuid.UUID, sender_user_id: uuid.UUID,
+                                text: str | None, image: str | None) -> tuple[bool, dict]:
+    """Ask the channel-hosting peer to authorise and apply an edit to a
+    message we sent into one of their channels. Returns (ok, info) — on
+    success info carries edited_at and the channel's edit_mode, so the caller
+    knows whether to keep a history copy of the old content locally."""
+    try:
+        resp = await _session(peer).request({
+            "type":           "edit_message",
+            "message_id":     msg_id,
+            "sender_user_id": sender_user_id,
+            "text":           text,
+            "has_image":      bool(image),
+        }, timeout=10)
+        if resp.get("ok"):
+            return True, {"edited_at": resp.get("edited_at"), "edit_mode": resp.get("edit_mode")}
+        return False, {"reason": resp.get("reason")}
+    except Exception as e:
+        log.warning("Failed to edit message on peer %s: %s %r", peer["address"], type(e).__name__, e)
+        return False, {"reason": "Could not reach that server"}
+
+
+async def fetch_message_history(peer: dict, msg_id: uuid.UUID) -> list[dict] | None:
+    """Fetch the prior-version edit history of a remote message, from
+    whichever server actually owns its content."""
+    our_address = await db.setting_get("peer_address") or _detect_outbound_address()
+    try:
+        resp = await _session(peer).request(
+            {"type": "get_message_history", "id": msg_id, "from": our_address}, timeout=10)
+        return resp.get("history") if resp.get("ok") else None
+    except Exception as e:
+        log.warning("Failed to fetch message history %s from %s: %s", msg_id, peer["address"], e)
         return None
 
 
@@ -878,10 +1042,20 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     creator = await db.user_by_id(channel["created_by"])
                     if creator:
                         creator_name = creator.get("display_name") or creator["name"]
+
+                # Check if the requesting remote user is a moderator of this channel.
+                req_uid    = _str_uuid(data.get("user_id"))
+                can_manage = bool(req_uid and await db.is_channel_moderator(cid, req_uid))
+
                 await ws.send_str(_dumps(_ok("read_channel",
                     channel={"id": channel["id"], "name": channel["name"],
                              "public": bool(channel["public"]), "icon": channel.get("icon"),
-                             "created_by_name": creator_name},
+                             "created_by_name": creator_name, "can_manage": can_manage,
+                             **{k: channel.get(k) for k in (
+                                 "allow_replies", "post_restricted", "restrict_replies",
+                                 "allow_images", "allow_reactions", "allow_markdown",
+                                 "edit_mode", "description",
+                             )}},
                     messages=messages)))
 
             # --- get_message: return content of a single message ---
@@ -922,7 +1096,71 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
                 await ws.send_str(_dumps(_err("get_message", "Not found")))
 
+            # --- get_message_history: prior versions of an edited message ---
+            elif msg_type == "get_message_history":
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("get_message_history", "Not authorised")))
+                    continue
+                mid = _str_uuid(data.get("id"))
+                if not mid:
+                    await ws.send_str(_dumps(_err("get_message_history", "Missing id")))
+                    continue
+
+                # History only ever lives alongside the content it belongs to —
+                # same access shape as get_message's Case A/B above.
+                index = await db.message_by_id(mid)
+                if index is not None:
+                    if index.get("sender_peer_id") is not None:
+                        await ws.send_str(_dumps(_err("get_message_history", "Not found")))
+                        continue
+                    channel = await db.channel_by_id(index["channel_id"])
+                    if channel and not channel["public"]:
+                        if not await db.peer_has_member_in_channel(channel["id"], peer_record["id"]):
+                            await ws.send_str(_dumps(_err("get_message_history", "Not authorised")))
+                            continue
+                    history = await db.message_edit_history_for(mid)
+                    await ws.send_str(_dumps(_ok("get_message_history", history=history)))
+                    continue
+
+                content = await db.message_content_local(mid)
+                if content is not None:
+                    history = await db.message_edit_history_for(mid)
+                    await ws.send_str(_dumps(_ok("get_message_history", history=history)))
+                    continue
+
+                await ws.send_str(_dumps(_err("get_message_history", "Not found")))
+
             # --- subscribe: peer wants live notifications for a channel ---
+            elif msg_type in ("set_channel_icon", "set_channel_public",
+                               "set_channel_allow_replies", "set_channel_post_restricted",
+                               "set_channel_restrict_replies", "set_channel_allow_images",
+                               "set_channel_allow_reactions", "set_channel_allow_markdown",
+                               "set_channel_edit_mode", "set_channel_description"):
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err(msg_type, "Peer authentication failed")))
+                    continue
+                cid     = _str_uuid(data.get("channel_id"))
+                req_uid = _str_uuid(data.get("sender_user_id"))
+                if not cid or not req_uid:
+                    await ws.send_str(_dumps(_err(msg_type, "Missing channel_id or sender_user_id")))
+                    continue
+                channel = await db.channel_by_id(cid)
+                if not channel:
+                    await ws.send_str(_dumps(_err(msg_type, "Channel not found")))
+                    continue
+                # Remote moderators can manage but cannot become creator —
+                # creator is always a local user.
+                if not await db.is_channel_moderator(cid, req_uid):
+                    await ws.send_str(_dumps(_err(msg_type, "Not authorised")))
+                    continue
+                # Delegate to the same local handler with a fake session object.
+                from handlers.ws import _HANDLERS
+                fake_session = {"user_id": req_uid}
+                result = await _HANDLERS[msg_type](data, fake_session, ws)
+                await ws.send_str(_dumps(result))
+
             elif msg_type == "subscribe":
                 cid          = _str_uuid(data.get("channel_id"))
                 peer_record  = await _authed_peer(data)
@@ -996,6 +1234,23 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                             await ws.send_str(_dumps(_err("new_message", "You are banned from this channel")))
                             continue
 
+                    if parent_id and not channel.get("allow_replies", True):
+                        await ws.send_str(_dumps(_err("new_message", "Replies are turned off in this channel")))
+                        continue
+
+                    # post_restricted always gates top-level posts; replies are only
+                    # gated too when the channel's restrict_replies sub-option is on.
+                    restricted = channel.get("post_restricted") and (not parent_id or channel.get("restrict_replies", True))
+                    if restricted and not await db.is_channel_moderator(cid, sender_user_id):
+                        # A locally-hosted channel's creator is always a local user, so a
+                        # remote sender can only ever qualify here via moderator status.
+                        await ws.send_str(_dumps(_err("new_message", "Only moderators can post in this channel")))
+                        continue
+
+                    if has_image and not channel.get("allow_images", True):
+                        await ws.send_str(_dumps(_err("new_message", "Images are turned off in this channel")))
+                        continue
+
                     if peer_id_val and sender_name:
                         await db.user_cache_upsert(sender_user_id, peer_id_val, sender_name, sender_avatar)
 
@@ -1013,7 +1268,7 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_str(_dumps(_ok("new_message", message_id=mid)))
 
                 # Push to any local clients watching this channel
-                from handlers.ws import broadcast_to_channel, push_to_stream
+                from handlers.ws import broadcast_to_channel, push_to_stream, push_notification
                 peer_name_val = peer_record.get("name") or sender_address
                 bcast_msg = {
                     "id":              str(mid),
@@ -1052,6 +1307,175 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                         "channel_public": relay_public,
                         "peer_id":        str(peer_id_val) if peer_id_val else None,
                     }})
+
+                await push_notification(cid, peer_id_val if not channel else None)
+
+            # --- edit_message: a peer is editing a message — either asking us
+            # (the channel host) to authorise + apply it, or just relaying an
+            # edit notification onward as a subscriber ---
+            elif msg_type == "edit_message":
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("edit_message", "Peer authentication failed")))
+                    continue
+
+                mid            = _str_uuid(data.get("message_id"))
+                cid            = _str_uuid(data.get("channel_id"))
+                sender_user_id = _str_uuid(data.get("sender_user_id"))
+                msg_text       = data.get("text")
+                has_image      = bool(data.get("has_image"))
+
+                if not mid:
+                    await ws.send_str(_dumps(_err("edit_message", "Missing message_id")))
+                    continue
+
+                channel = await db.channel_by_id(cid) if cid else None
+
+                if channel:
+                    # We host this channel's index: treat this as an edit
+                    # REQUEST and validate the editor actually owns the message.
+                    index = await db.message_by_id(mid)
+                    if (not index or index.get("sender_user_id") != sender_user_id
+                            or str(index.get("sender_peer_id")) != str(peer_record["id"])):
+                        await ws.send_str(_dumps(_err("edit_message", "Not authorised")))
+                        continue
+
+                    mode = channel.get("edit_mode", "off")
+                    if mode == "off":
+                        await ws.send_str(_dumps(_err("edit_message", "Editing is turned off in this channel")))
+                        continue
+
+                    edited_at = datetime.now(timezone.utc)
+                    await db.message_index_set_edited(mid, edited_at)
+                    # Content for a remote-origin message is never cached here —
+                    # nothing local to update or version; the editor's own
+                    # server holds the actual text/image and its history.
+
+                    await ws.send_str(_dumps(_ok("edit_message", edited_at=edited_at, edit_mode=mode)))
+                else:
+                    # Relay: we're just a subscriber, not the host — trust the
+                    # upstream peer the same way new_message's relay branch does,
+                    # and don't re-fan-out further (only the host does that).
+                    if not cid:
+                        await ws.send_str(_dumps(_err("edit_message", "Missing channel_id")))
+                        continue
+                    try:
+                        edited_at = datetime.fromisoformat(data.get("edited_at"))
+                    except (ValueError, TypeError):
+                        edited_at = datetime.now(timezone.utc)
+                    await ws.send_str(_dumps(_ok("edit_message")))
+
+                from handlers.ws import broadcast_to_channel, push_to_stream
+                bcast_msg = {
+                    "id":         str(mid),
+                    "channel_id": str(cid),
+                    "text":       msg_text,
+                    "image":      "📷" if has_image and not msg_text else None,
+                    "edited_at":  edited_at.isoformat(),
+                    "remote":     True,
+                }
+                await broadcast_to_channel(cid, {"type": "message_edited", "ok": True, "message": bcast_msg})
+                if channel and not channel.get("stream_excluded"):
+                    await push_to_stream({"type": "stream_message_edited", "ok": True, "message": {
+                        **bcast_msg,
+                        "channel_name":   channel["name"],
+                        "channel_public": channel["public"],
+                    }})
+                if channel:
+                    asyncio.create_task(notify_peers_of_edit(
+                        cid, mid, msg_text, "📷" if has_image else None, edited_at,
+                        exclude_peer=peer_record["address"],
+                    ))
+
+            elif msg_type == "delete_message":
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("delete_message", "Peer authentication failed")))
+                    continue
+
+                mid            = _str_uuid(data.get("message_id"))
+                cid            = _str_uuid(data.get("channel_id"))
+                sender_user_id = _str_uuid(data.get("sender_user_id"))
+
+                if not mid:
+                    await ws.send_str(_dumps(_err("delete_message", "Missing message_id")))
+                    continue
+
+                channel = await db.channel_by_id(cid) if cid else None
+
+                if channel:
+                    # We host this channel: validate the requester owns the message.
+                    index = await db.message_by_id(mid)
+                    if (not index or index.get("sender_user_id") != sender_user_id
+                            or str(index.get("sender_peer_id")) != str(peer_record["id"])):
+                        await ws.send_str(_dumps(_err("delete_message", "Not authorised")))
+                        continue
+                    await db.message_delete(mid)
+                    await ws.send_str(_dumps(_ok("delete_message")))
+                else:
+                    # Relay: not the host, just forward the push to local clients.
+                    if not cid:
+                        await ws.send_str(_dumps(_err("delete_message", "Missing channel_id")))
+                        continue
+                    await ws.send_str(_dumps(_ok("delete_message")))
+
+                from handlers.ws import broadcast_to_channel, push_to_stream
+                payload = {"type": "message_deleted", "ok": True,
+                           "id": str(mid), "channel_id": str(cid)}
+                await broadcast_to_channel(cid, payload)
+                if channel and not channel.get("stream_excluded"):
+                    await push_to_stream({**payload, "type": "stream_message_deleted"})
+                if channel:
+                    asyncio.create_task(notify_peers_of_deletion(
+                        cid, mid, exclude_peer=peer_record["address"]))
+
+            elif msg_type == "toggle_reaction":
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("toggle_reaction", "Peer authentication failed")))
+                    continue
+
+                mid            = _str_uuid(data.get("message_id"))
+                cid            = _str_uuid(data.get("channel_id"))
+                sender_user_id = _str_uuid(data.get("sender_user_id"))
+                emoji          = data.get("emoji")
+
+                if not mid or not cid:
+                    await ws.send_str(_dumps(_err("toggle_reaction", "Missing message_id or channel_id")))
+                    continue
+
+                channel = await db.channel_by_id(cid)
+
+                if channel:
+                    # We host this channel: this is an action request from a remote user.
+                    if not emoji or not sender_user_id:
+                        await ws.send_str(_dumps(_err("toggle_reaction", "Missing emoji or sender_user_id")))
+                        continue
+                    if not channel["public"]:
+                        if not await db.is_remote_member(cid, sender_user_id, peer_record["id"]):
+                            await ws.send_str(_dumps(_err("toggle_reaction", "Not a member of this channel")))
+                            continue
+                    else:
+                        if await db.is_banned(cid, sender_user_id, peer_record["id"]):
+                            await ws.send_str(_dumps(_err("toggle_reaction", "You are banned from this channel")))
+                            continue
+                    if not channel.get("allow_reactions", True):
+                        await ws.send_str(_dumps(_err("toggle_reaction", "Reactions are turned off in this channel")))
+                        continue
+                    await db.reaction_toggle(mid, sender_user_id, peer_record["id"], emoji)
+                    reactions = await db.reactions_for_message(mid)
+                    await ws.send_str(_dumps(_ok("toggle_reaction", reactions=reactions)))
+                else:
+                    # Relay: not the host, just forward the push to local clients.
+                    reactions = data.get("reactions", [])
+                    await ws.send_str(_dumps(_ok("toggle_reaction")))
+
+                from handlers.ws import broadcast_to_channel
+                await broadcast_to_channel(cid, {"type": "reaction_updated", "ok": True,
+                    "id": str(mid), "channel_id": str(cid), "reactions": reactions})
+                if channel:
+                    asyncio.create_task(notify_peers_of_reaction(
+                        cid, mid, reactions, exclude_peer=peer_record["address"]))
 
             else:
                 await ws.send_str(_dumps(_err(msg_type, f"Unknown type: {msg_type}")))

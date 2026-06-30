@@ -9,8 +9,9 @@
 <nav class="wiki-toc">
     <a href="#public-vs-private">Public vs private</a>
     <a href="#creating">Creating a channel</a>
+    <a href="#settings">Channel settings</a>
+    <a href="#moderators">Moderators</a>
     <a href="#stream">The stream</a>
-    <a href="#icon">Channel icon</a>
     <a href="#remote">Remote channels</a>
     <a href="#bans">Banning users</a>
     <a href="#sharing">Sharing a link</a>
@@ -19,23 +20,62 @@
 <hr>
 
 <h2 id="public-vs-private">Public vs private</h2>
-<p><strong>Public channels</strong> are open to everyone on your server and visible to users on connected servers. Anyone can read and post.</p>
+<p><strong>Public channels</strong> are open to everyone on your server and visible to users on connected servers. Anyone can read and post (unless post-restriction is on — see below).</p>
 <p><strong>Private channels</strong> are invitation-only. They don't appear to anyone who isn't a member, and federated servers can only see them if at least one of their users has been added.</p>
 
 <hr>
 
 <h2 id="creating">Creating a channel</h2>
-<p>Go to <strong>💬 Channels</strong> and fill in the name at the bottom of the page. Tick <em>Private</em> if you want to control who can join. The channel is created immediately and you're its owner.</p>
+<p>Go to <strong>💬 Channels</strong> and click <strong>+ New channel</strong>. A panel opens where you configure the channel before it's created:</p>
+<ul>
+    <li><strong>Icon</strong> — click the emoji to pick one from the picker.</li>
+    <li><strong>Name</strong> — required; can't be changed after creation.</li>
+    <li><strong>Description</strong> — optional short text shown below the chat header.</li>
+    <li><strong>Private</strong> — tick to make the channel invitation-only.</li>
+    <li>Any of the settings described in the next section.</li>
+</ul>
+<p>You become the channel's creator (owner) automatically.</p>
+
+<hr>
+
+<h2 id="settings">Channel settings</h2>
+<p>The channel creator and any moderators can edit settings at any time. Open the channel and click <strong>✏️</strong> in the header, or click ✏️ next to the channel name on the Channels page.</p>
+<p>The settings panel lets you change:</p>
+
+<h3>Allow replies / threading</h3>
+<p>When on (default), users can reply to individual messages and threads are indented under the original. Turn it off to make the channel a flat list of top-level posts only.</p>
+
+<h3>Only moderators can post</h3>
+<p>When on, regular members can read but not start new conversations. Useful for announcement channels.</p>
+<p>If <em>Allow replies</em> is also on, a sub-option becomes available: <strong>Also restrict replies</strong>. When this is ticked (default), only moderators can post anything at all. When unticked, moderators start the topics and everyone else can reply to them.</p>
+
+<h3>Allow images</h3>
+<p>When off, the image-upload button disappears and the server rejects any message that contains an image.</p>
+
+<h3>Editing</h3>
+<p>Controls whether posted messages can be edited after sending:</p>
+<ul>
+    <li><strong>Off</strong> (default) — messages are permanent.</li>
+    <li><strong>On, with history</strong> — the sender can edit, but a <em>(edited)</em> badge appears and anyone can click it to see earlier versions.</li>
+    <li><strong>On, silent</strong> — the sender can edit and the original text is replaced without any history being kept.</li>
+</ul>
+<p>Editing works across federated servers — the edit is sent to the channel's host, which enforces the channel's own policy.</p>
+
+<hr>
+
+<h2 id="moderators">Moderators</h2>
+<p>The channel creator can promote any member to <strong>moderator</strong>. Open the channel, click <strong>Members</strong>, and click the ☆ next to someone's name. The star turns solid (⭐) to indicate moderator status. Click it again to revoke.</p>
+<p>Moderators can do everything in the settings panel described above. They cannot:</p>
+<ul>
+    <li>Delete the channel (creator only).</li>
+    <li>Promote or demote other moderators (creator only).</li>
+</ul>
+<p>The server owner has no special rights over a channel they didn't create.</p>
 
 <hr>
 
 <h2 id="stream">The stream</h2>
 <p>Every channel has a toggle — 🔔 or 🔕 — that controls whether its messages appear in your Stream. Public channels are opt-in (you subscribe to them); private channels appear by default and you can mute them individually.</p>
-
-<hr>
-
-<h2 id="icon">Channel icon</h2>
-<p>The channel owner can change the icon that appears next to the channel name. Open the channel and click the icon in the header to pick a new one from the emoji picker.</p>
 
 <hr>
 
@@ -46,7 +86,7 @@
 <hr>
 
 <h2 id="bans">Banning users</h2>
-<p>In public channels, the channel owner can ban users who are disrupting the conversation. Open the channel, click <strong>Ban users</strong> in the header, and drag someone from the active list to the banned list. Banned users can still see the channel but can no longer post.</p>
+<p>In public channels, the channel creator and moderators can ban users who are disrupting the conversation. Open the channel, click <strong>Ban users</strong> in the header, and drag someone from the active list to the banned list. Banned users can still see the channel but can no longer post.</p>
 <p>To unban, drag them back.</p>
 
 <hr>

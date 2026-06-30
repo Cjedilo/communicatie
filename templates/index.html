@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Messages</title>
-    <link rel="stylesheet" href="{{ base_path }}/communicatie.css?v=50">
+    <link rel="stylesheet" href="{{ base_path }}/communicatie.css?v=64">
     <link rel="manifest" href="{{ base_path }}/manifest.json">
     <link rel="icon" href="{{ base_path }}/icon-192.png">
     <link rel="apple-touch-icon" href="{{ base_path }}/icon-192.png">
@@ -21,7 +21,7 @@
     <!-- Desktop sidebar nav -->
     <nav id="sidenav">
         <a class="nav-logo" href="{{ base_path }}/wiki/" title="About Messages">C</a>
-        <a class="nav-item" data-page="stream"   title="Stream">🌊</a>
+        <a class="nav-item" data-page="stream"   title="Stream">🌊<span id="mention_badge" class="mention-badge hidden">@</span></a>
         <a class="nav-item" data-page="channels" title="Channels">💬</a>
         <a class="nav-item" data-page="peers"    title="Peers">🔗</a>
         <a class="nav-item" data-page="users"    title="Users">👥</a>
@@ -39,7 +39,7 @@
 
 <!-- Mobile bottom nav -->
 <nav id="bottom-nav">
-    <a class="nav-item" data-page="stream">🌊<span>Stream</span></a>
+    <a class="nav-item" data-page="stream">🌊<span>Stream</span><span id="mention_badge_mobile" class="mention-badge hidden">@</span></a>
     <a class="nav-item" data-page="channels">💬<span>Channels</span></a>
     <a class="nav-item" data-page="peers">🔗<span>Peers</span></a>
     <a class="nav-item" data-page="users">👥<span>Users</span></a>
@@ -56,7 +56,7 @@
 <div id="error" class="hidden"></div>
 
 <script>var _base_path = "{{ base_path }}";</script>
-<script src="{{ base_path }}/communicatie.js?v=50"></script>
+<script src="{{ base_path }}/communicatie.js?v=64"></script>
 <script>
     communicatie.init(
         {{ 'true' if logged_in else 'false' }},

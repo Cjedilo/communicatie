@@ -38,6 +38,19 @@ def _coerce_row(row: dict) -> dict:
     return {k: _coerce(v) for k, v in row.items()}
 
 
+def _flatten_settings(row: dict) -> dict:
+    """Unpack the channels.settings JSON blob into top-level dict keys, so
+    callers can keep using channel.get("allow_replies") etc. regardless of
+    how the value is actually stored on disk."""
+    raw = row.pop("settings", None)
+    if raw:
+        try:
+            row.update(json.loads(raw))
+        except (ValueError, TypeError):
+            pass
+    return row
+
+
 def _sqlite_arg(v):
     """Convert Python value to SQLite-compatible scalar."""
     if isinstance(v, uuid.UUID):
@@ -85,6 +98,72 @@ class _PGBackend:
             await c.execute(
                 "ALTER TABLE peers ADD COLUMN IF NOT EXISTS auth_token TEXT"
             )
+            await c.execute(
+                "ALTER TABLE channel_members ADD COLUMN IF NOT EXISTS is_moderator BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+            await c.execute(
+                "ALTER TABLE channels ADD COLUMN IF NOT EXISTS settings TEXT NOT NULL DEFAULT '{}'"
+            )
+            # One-time: fold the old per-feature columns into the settings
+            # blob and drop them. No-ops once they're gone (caught below).
+            try:
+                await c.execute(
+                    "UPDATE channels SET settings = ("
+                    "  COALESCE(NULLIF(settings, '')::jsonb, '{}'::jsonb) || "
+                    "  jsonb_build_object('allow_replies', allow_replies, "
+                    "                     'post_restricted', post_restricted)"
+                    ")::text"
+                )
+                await c.execute("ALTER TABLE channels DROP COLUMN allow_replies")
+                await c.execute("ALTER TABLE channels DROP COLUMN post_restricted")
+            except Exception:
+                pass
+            await c.execute(
+                "ALTER TABLE message_index ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ"
+            )
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS message_edit_history (
+                    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    message_id  UUID        NOT NULL,
+                    text        TEXT,
+                    image       TEXT,
+                    edited_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await c.execute(
+                "CREATE INDEX IF NOT EXISTS msg_edit_history_msg ON message_edit_history(message_id)"
+            )
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS message_reactions (
+                    message_id  UUID        NOT NULL,
+                    user_id     UUID        NOT NULL,
+                    peer_id     UUID,
+                    emoji       TEXT        NOT NULL,
+                    created     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (message_id, user_id, emoji)
+                )
+            """)
+            await c.execute(
+                "CREATE INDEX IF NOT EXISTS msg_reactions_msg ON message_reactions(message_id)"
+            )
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS channel_read_state (
+                    user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    channel_id  UUID        NOT NULL,
+                    last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_id, channel_id)
+                )
+            """)
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS message_mentions (
+                    message_id          UUID NOT NULL,
+                    mentioned_user_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    PRIMARY KEY (message_id, mentioned_user_id)
+                )
+            """)
+            await c.execute(
+                "CREATE INDEX IF NOT EXISTS msg_mentions_user ON message_mentions(mentioned_user_id)"
+            )
 
     async def close(self):
         if self._pool:
@@ -92,12 +171,12 @@ class _PGBackend:
 
     async def fetch(self, query: str, *args) -> list[dict]:
         async with self._pool.acquire() as c:
-            return [dict(r) for r in await c.fetch(query, *args)]
+            return [_flatten_settings(dict(r)) for r in await c.fetch(query, *args)]
 
     async def fetchrow(self, query: str, *args) -> dict | None:
         async with self._pool.acquire() as c:
             r = await c.fetchrow(query, *args)
-            return dict(r) if r else None
+            return _flatten_settings(dict(r)) if r else None
 
     async def execute(self, query: str, *args):
         async with self._pool.acquire() as c:
@@ -137,12 +216,83 @@ class _SQLiteBackend:
             "ALTER TABLE peers ADD COLUMN auth_token TEXT",
             "ALTER TABLE users ADD COLUMN display_name TEXT",
             "ALTER TABLE channels ADD COLUMN icon TEXT",
+            "ALTER TABLE channel_members ADD COLUMN is_moderator INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE channels ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE message_index ADD COLUMN edited_at TEXT",
         ]:
             try:
                 await self._conn.execute(col_sql)
                 await self._conn.commit()
             except Exception:
                 pass  # column already exists
+
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_edit_history (
+                id          TEXT    PRIMARY KEY,
+                message_id  TEXT    NOT NULL,
+                text        TEXT,
+                image       TEXT,
+                edited_at   TEXT    NOT NULL
+            )
+        """)
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS msg_edit_history_msg ON message_edit_history(message_id)"
+        )
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_reactions (
+                message_id  TEXT    NOT NULL,
+                user_id     TEXT    NOT NULL,
+                peer_id     TEXT,
+                emoji       TEXT    NOT NULL,
+                created     TEXT    NOT NULL,
+                PRIMARY KEY (message_id, user_id, emoji)
+            )
+        """)
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS msg_reactions_msg ON message_reactions(message_id)"
+        )
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_read_state (
+                user_id      TEXT NOT NULL,
+                channel_id   TEXT NOT NULL,
+                last_read_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, channel_id)
+            )
+        """)
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_mentions (
+                message_id          TEXT NOT NULL,
+                mentioned_user_id   TEXT NOT NULL,
+                PRIMARY KEY (message_id, mentioned_user_id)
+            )
+        """)
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS msg_mentions_user ON message_mentions(mentioned_user_id)"
+        )
+        await self._conn.commit()
+
+        # One-time: fold the old per-feature columns into the settings blob
+        # and drop them. No-ops once they're gone (caught below).
+        try:
+            cur = await self._conn.execute(
+                "SELECT id, allow_replies, post_restricted, settings FROM channels"
+            )
+            rows = await cur.fetchall()
+            for row in rows:
+                try:
+                    current = json.loads(row["settings"]) if row["settings"] else {}
+                except (ValueError, TypeError):
+                    current = {}
+                current.setdefault("allow_replies", bool(row["allow_replies"]))
+                current.setdefault("post_restricted", bool(row["post_restricted"]))
+                await self._conn.execute(
+                    "UPDATE channels SET settings=? WHERE id=?", (json.dumps(current), row["id"])
+                )
+            await self._conn.execute("ALTER TABLE channels DROP COLUMN allow_replies")
+            await self._conn.execute("ALTER TABLE channels DROP COLUMN post_restricted")
+            await self._conn.commit()
+        except Exception:
+            pass
 
         await self._conn.commit()
 
@@ -153,13 +303,13 @@ class _SQLiteBackend:
     async def fetch(self, query: str, *args) -> list[dict]:
         q, a = _pg_to_sqlite(query, args)
         async with self._conn.execute(q, a) as cur:
-            return [_coerce_row(dict(r)) for r in await cur.fetchall()]
+            return [_flatten_settings(_coerce_row(dict(r))) for r in await cur.fetchall()]
 
     async def fetchrow(self, query: str, *args) -> dict | None:
         q, a = _pg_to_sqlite(query, args)
         async with self._conn.execute(q, a) as cur:
             r = await cur.fetchone()
-            return _coerce_row(dict(r)) if r else None
+            return _flatten_settings(_coerce_row(dict(r))) if r else None
 
     async def execute(self, query: str, *args):
         q, a = _pg_to_sqlite(query, args)
@@ -368,6 +518,11 @@ async def channel_set_icon(channel_id: uuid.UUID, icon: str | None):
     await _db.execute("UPDATE channels SET icon=$2 WHERE id=$1", channel_id, icon or None)
 
 
+async def channel_set_public(channel_id: uuid.UUID, public: bool):
+    val = 1 if (_is_sqlite and public) else public
+    await _db.execute("UPDATE channels SET public=$2 WHERE id=$1", channel_id, val)
+
+
 async def user_set_display_name(uid: uuid.UUID, display_name: str | None):
     await _db.execute("UPDATE users SET display_name=$2 WHERE id=$1", uid, display_name or None)
 
@@ -404,19 +559,30 @@ async def sessions_purge_expired():
 # Channels
 # ---------------------------------------------------------------------------
 
-async def channel_create(name: str, public: bool, created_by: uuid.UUID, icon: str | None = None) -> dict:
-    cid  = _new_id()
-    pub  = 1 if (_is_sqlite and public) else public
-    excl = 1 if (_is_sqlite and public) else public  # public → excluded from stream by default
+async def channel_create(name: str, public: bool, created_by: uuid.UUID, icon: str | None = None,
+                          allow_replies: bool = True, post_restricted: bool = False,
+                          edit_mode: str = "off", description: str = "",
+                          allow_images: bool = True, restrict_replies: bool = True,
+                          allow_reactions: bool = True, allow_markdown: bool = True) -> dict:
+    cid      = _new_id()
+    pub      = 1 if (_is_sqlite and public) else public
+    excl     = 1 if (_is_sqlite and public) else public  # public → excluded from stream by default
+    settings = json.dumps({
+        "allow_replies": allow_replies, "post_restricted": post_restricted, "edit_mode": edit_mode,
+        "description": description, "allow_images": allow_images, "restrict_replies": restrict_replies,
+        "allow_reactions": allow_reactions, "allow_markdown": allow_markdown,
+    })
     if _is_sqlite:
         await _db.execute(
-            "INSERT INTO channels(id,name,public,created_by,stream_excluded,icon) VALUES($1,$2,$3,$4,$5,$6)",
-            cid, name, pub, created_by, excl, icon,
+            "INSERT INTO channels(id,name,public,created_by,stream_excluded,icon,settings) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7)",
+            cid, name, pub, created_by, excl, icon, settings,
         )
         return await _db.fetchrow("SELECT * FROM channels WHERE id=$1", cid)
     return await _db.fetchrow(
-        "INSERT INTO channels(id,name,public,created_by,stream_excluded,icon) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
-        cid, name, public, created_by, public, icon,
+        "INSERT INTO channels(id,name,public,created_by,stream_excluded,icon,settings) "
+        "VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+        cid, name, public, created_by, public, icon, settings,
     )
 
 
@@ -497,6 +663,40 @@ async def channel_set_stream_excluded(channel_id: uuid.UUID, excluded: bool):
     )
 
 
+async def users_with_moderator_status(channel_id: uuid.UUID) -> list[dict]:
+    """All local users annotated with is_moderator for a given channel (for public channel mod management)."""
+    rows = await _db.fetch(
+        """
+        SELECT u.id, u.name, u.display_name, u.avatar,
+            COALESCE((
+                SELECT cm.is_moderator FROM channel_members cm
+                WHERE cm.channel_id=$1 AND cm.user_id=u.id AND cm.peer_id IS NULL
+            ), $2) AS is_moderator
+        FROM users u
+        ORDER BY u.name
+        """,
+        channel_id,
+        0 if _is_sqlite else False,
+    )
+    return [dict(r) for r in rows]
+
+
+async def channel_poster_count(channel_id: uuid.UUID) -> int:
+    row = await _db.fetchrow(
+        "SELECT COUNT(DISTINCT sender_user_id) AS n FROM message_index WHERE channel_id=$1",
+        channel_id,
+    )
+    return int(row["n"]) if row else 0
+
+
+async def channel_update_settings(channel_id: uuid.UUID, updates: dict):
+    """Merge `updates` into a channel's free-form settings blob (allow_replies,
+    post_restricted, and future per-channel feature flags)."""
+    current = await _db.fetchrow("SELECT settings FROM channels WHERE id=$1", channel_id) or {}
+    current.update(updates)
+    await _db.execute("UPDATE channels SET settings=$2 WHERE id=$1", channel_id, json.dumps(current))
+
+
 async def channels_stream(user_id: uuid.UUID) -> list[dict]:
     """Channels visible to user with last-message preview, sorted by last activity."""
     return await _db.fetch(
@@ -556,14 +756,21 @@ async def channel_direct_find(user_id_a: uuid.UUID, user_id_b: uuid.UUID,
 async def channels_visible_to(user_id: uuid.UUID) -> list[dict]:
     return await _db.fetch(
         """
-        SELECT DISTINCT c.*, u.name AS created_by_name
+        SELECT DISTINCT c.*, u.name AS created_by_name,
+            (c.created_by = $1 OR EXISTS (
+                SELECT 1 FROM channel_members cmod
+                WHERE cmod.channel_id = c.id AND cmod.user_id = $1 AND cmod.is_moderator = $3
+            )) AS can_manage,
+            (SELECT COUNT(DISTINCT mi.sender_user_id)
+             FROM message_index mi
+             WHERE mi.channel_id = c.id) AS poster_count
         FROM channels c
         LEFT JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = $1
         LEFT JOIN users u ON u.id = c.created_by
         WHERE c.public = $2 OR cm.user_id IS NOT NULL
         ORDER BY c.name
         """,
-        user_id, 1 if _is_sqlite else True,
+        user_id, 1 if _is_sqlite else True, 1 if _is_sqlite else True,
     )
 
 
@@ -620,6 +827,22 @@ async def member_remove(channel_id: uuid.UUID, user_id: uuid.UUID):
         "DELETE FROM channel_members WHERE channel_id=$1 AND user_id=$2",
         channel_id, user_id,
     )
+
+
+async def member_set_moderator(channel_id: uuid.UUID, user_id: uuid.UUID, is_moderator: bool):
+    val = 1 if (_is_sqlite and is_moderator) else is_moderator
+    await _db.execute(
+        "UPDATE channel_members SET is_moderator=$3 WHERE channel_id=$1 AND user_id=$2",
+        channel_id, user_id, val,
+    )
+
+
+async def is_channel_moderator(channel_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+    r = await _db.fetchrow(
+        "SELECT 1 FROM channel_members WHERE channel_id=$1 AND user_id=$2 AND is_moderator=$3",
+        channel_id, user_id, 1 if _is_sqlite else True,
+    )
+    return r is not None
 
 
 async def members_of(channel_id: uuid.UUID) -> list[dict]:
@@ -817,7 +1040,7 @@ async def messages_for_channel(channel_id: uuid.UUID, limit: int = 100, before=N
     # With `before`: DESC so we get the *newest* messages before the cursor (stream pagination).
     # Without `before`: ASC for the normal chat view.
     order = "DESC" if before is not None else "ASC"
-    return await _db.fetch(
+    messages = await _db.fetch(
         f"""
         SELECT mi.*, mc.text, mc.image,
                COALESCE(COALESCE(u.display_name, u.name), uc.name,
@@ -838,6 +1061,10 @@ async def messages_for_channel(channel_id: uuid.UUID, limit: int = 100, before=N
         """,
         channel_id, limit, *extra_args,
     )
+    reactions = await reactions_for_messages([m["id"] for m in messages])
+    for m in messages:
+        m["reactions"] = reactions.get(str(m["id"]), [])
+    return messages
 
 
 async def message_by_id(msg_id: uuid.UUID) -> dict | None:
@@ -879,11 +1106,185 @@ async def message_content_add(msg_id: uuid.UUID, text: str | None, image: str | 
     )
 
 
+async def message_delete(msg_id: uuid.UUID):
+    """Delete a message's index entry and local content (if any)."""
+    await _db.execute("DELETE FROM message_content WHERE id=$1", msg_id)
+    await _db.execute("DELETE FROM message_index WHERE id=$1", msg_id)
+
+
 async def message_content_local(msg_id: uuid.UUID) -> dict | None:
     """Return content if this server is the origin (sender stored it here)."""
     return await _db.fetchrow(
         "SELECT id, text, image FROM message_content WHERE id=$1", msg_id
     )
+
+
+async def message_content_update(msg_id: uuid.UUID, text: str | None, image: str | None):
+    await _db.execute(
+        "UPDATE message_content SET text=$2, image=$3 WHERE id=$1",
+        msg_id, text, image,
+    )
+
+
+async def message_index_set_edited(msg_id: uuid.UUID, edited_at: datetime):
+    await _db.execute(
+        "UPDATE message_index SET edited_at=$2 WHERE id=$1",
+        msg_id, edited_at,
+    )
+
+
+async def message_edit_history_add(msg_id: uuid.UUID, text: str | None, image: str | None,
+                                    edited_at: datetime):
+    await _db.execute(
+        "INSERT INTO message_edit_history(id,message_id,text,image,edited_at) VALUES($1,$2,$3,$4,$5)",
+        _new_id(), msg_id, text, image, edited_at,
+    )
+
+
+async def message_edit_history_for(msg_id: uuid.UUID) -> list[dict]:
+    return await _db.fetch(
+        "SELECT text, image, edited_at FROM message_edit_history "
+        "WHERE message_id=$1 ORDER BY edited_at DESC",
+        msg_id,
+    )
+
+
+async def reaction_toggle(message_id: uuid.UUID, user_id: uuid.UUID,
+                           peer_id: uuid.UUID | None, emoji: str) -> bool:
+    """Add or remove a user's reaction. Returns True if added, False if removed."""
+    existing = await _db.fetchrow(
+        "SELECT 1 FROM message_reactions WHERE message_id=$1 AND user_id=$2 AND emoji=$3",
+        message_id, user_id, emoji,
+    )
+    if existing:
+        await _db.execute(
+            "DELETE FROM message_reactions WHERE message_id=$1 AND user_id=$2 AND emoji=$3",
+            message_id, user_id, emoji,
+        )
+        return False
+    await _db.execute(
+        "INSERT INTO message_reactions(message_id,user_id,peer_id,emoji,created) VALUES($1,$2,$3,$4,$5)",
+        message_id, user_id, peer_id, emoji, _now(),
+    )
+    return True
+
+
+async def reactions_for_message(message_id: uuid.UUID) -> list[dict]:
+    rows = await _db.fetch(
+        "SELECT emoji, user_id FROM message_reactions WHERE message_id=$1 ORDER BY created",
+        message_id,
+    )
+    grouped: dict[str, list[str]] = {}
+    for r in rows:
+        grouped.setdefault(r["emoji"], []).append(str(r["user_id"]))
+    return [{"emoji": e, "users": u} for e, u in grouped.items()]
+
+
+async def reactions_for_messages(message_ids: list[uuid.UUID]) -> dict[str, list[dict]]:
+    """Batch version for attaching reactions to a list of already-loaded messages."""
+    if not message_ids:
+        return {}
+    if _is_sqlite:
+        placeholders = ",".join(f"${i+1}" for i in range(len(message_ids)))
+        rows = await _db.fetch(
+            f"SELECT message_id, emoji, user_id FROM message_reactions "
+            f"WHERE message_id IN ({placeholders}) ORDER BY created",
+            *message_ids,
+        )
+    else:
+        rows = await _db.fetch(
+            "SELECT message_id, emoji, user_id FROM message_reactions "
+            "WHERE message_id = ANY($1::uuid[]) ORDER BY created",
+            message_ids,
+        )
+    grouped: dict[str, dict[str, list[str]]] = {}
+    for r in rows:
+        mid = str(r["message_id"])
+        grouped.setdefault(mid, {}).setdefault(r["emoji"], []).append(str(r["user_id"]))
+    return {
+        mid: [{"emoji": e, "users": u} for e, u in emojis.items()]
+        for mid, emojis in grouped.items()
+    }
+
+
+async def message_mentions_store(message_id: uuid.UUID, user_ids: list[uuid.UUID]):
+    """Record which local users are mentioned in a message."""
+    for uid in user_ids:
+        await _db.execute(
+            "INSERT INTO message_mentions(message_id, mentioned_user_id) VALUES($1,$2) "
+            "ON CONFLICT DO NOTHING",
+            message_id, uid,
+        )
+
+
+async def mentions_unread_counts(user_id: uuid.UUID) -> dict[str, int]:
+    """Return {channel_id_str: mention_count} for channels where this user
+    has unread mentions (messages after their last_read_at that mention them)."""
+    rows = await _db.fetch(
+        """
+        SELECT mi.channel_id, COUNT(*) AS cnt
+        FROM message_mentions mm
+        JOIN message_index mi ON mi.id = mm.message_id
+        JOIN channel_read_state crs
+            ON crs.channel_id = mi.channel_id AND crs.user_id = $1
+        WHERE mm.mentioned_user_id = $1
+          AND mi.created > crs.last_read_at
+        GROUP BY mi.channel_id
+        """,
+        user_id,
+    )
+    return {str(r["channel_id"]): int(r["cnt"]) for r in rows}
+
+
+async def users_by_names(names: list[str]) -> list[dict]:
+    """Look up local users matching any of the given names (name or display_name)."""
+    if not names:
+        return []
+    if _is_sqlite:
+        placeholders = ",".join(f"${i+1}" for i in range(len(names)))
+        return await _db.fetch(
+            f"SELECT id, name, display_name FROM users "
+            f"WHERE LOWER(name) IN ({placeholders}) OR LOWER(display_name) IN ({placeholders})",
+            *[n.lower() for n in names], *[n.lower() for n in names],
+        )
+    return await _db.fetch(
+        "SELECT id, name, display_name FROM users "
+        "WHERE LOWER(name) = ANY($1) OR LOWER(display_name) = ANY($1)",
+        [n.lower() for n in names],
+    )
+
+
+async def channel_mark_read(user_id: uuid.UUID, channel_id: uuid.UUID):
+    """Upsert last_read_at = NOW() for this user+channel."""
+    if _is_sqlite:
+        await _db.execute(
+            "INSERT INTO channel_read_state(user_id,channel_id,last_read_at) VALUES($1,$2,$3) "
+            "ON CONFLICT(user_id,channel_id) DO UPDATE SET last_read_at=$3",
+            user_id, channel_id, _now(),
+        )
+    else:
+        await _db.execute(
+            "INSERT INTO channel_read_state(user_id,channel_id,last_read_at) VALUES($1,$2,NOW()) "
+            "ON CONFLICT(user_id,channel_id) DO UPDATE SET last_read_at=NOW()",
+            user_id, channel_id,
+        )
+
+
+async def channels_unread_counts(user_id: uuid.UUID) -> dict[str, int]:
+    """Return {channel_id_str: unread_count} for channels this user has read before.
+    Channels with no read_state entry are ignored (never opened = no badge)."""
+    rows = await _db.fetch(
+        """
+        SELECT mi.channel_id, COUNT(*) AS cnt
+        FROM message_index mi
+        JOIN channel_read_state crs
+            ON crs.channel_id = mi.channel_id AND crs.user_id = $1
+        WHERE mi.created > crs.last_read_at
+        GROUP BY mi.channel_id
+        """,
+        user_id,
+    )
+    return {str(r["channel_id"]): int(r["cnt"]) for r in rows}
 
 
 # ---------------------------------------------------------------------------
