@@ -1949,7 +1949,7 @@ function load_channel() {
                         var li  = make("li", "user-msg-item");
                         var top = make("div", "user-msg-top");
                         top.appendChild(make("span", "user-msg-channel",
-                            (m.channel_public ? "🌐" : "🔒") + " " + m.channel_name));
+                            (m.channel_icon || (m.channel_public ? "🌐" : "🔒")) + " " + m.channel_name));
                         top.appendChild(make("span", "stream-time", fmt_relative(m.created)));
                         li.appendChild(top);
                         var txt = m.image && !m.text ? "📷 Image" : (m.text || "…");

@@ -767,7 +767,7 @@ async def messages_by_user_for_peer(
         """
         SELECT mi.id, mi.channel_id, mi.created,
                mc.text, mc.image,
-               c.name AS channel_name, c.public AS channel_public
+               c.name AS channel_name, c.public AS channel_public, c.icon AS channel_icon
         FROM message_index mi
         JOIN channels c ON c.id = mi.channel_id
         LEFT JOIN channel_members cm
@@ -795,7 +795,7 @@ async def messages_by_user(
         """
         SELECT mi.id, mi.channel_id, mi.created,
                mc.text, mc.image,
-               c.name AS channel_name, c.public AS channel_public
+               c.name AS channel_name, c.public AS channel_public, c.icon AS channel_icon
         FROM message_index mi
         JOIN channels c ON c.id = mi.channel_id
         LEFT JOIN channel_members cm
