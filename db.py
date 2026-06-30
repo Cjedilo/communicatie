@@ -330,6 +330,17 @@ async def user_set_avatar(uid: uuid.UUID, path: str):
 
 
 async def user_delete(uid: uuid.UUID):
+    # sender_user_id has no FK to users (it's polymorphic: local or remote
+    # depending on sender_peer_id), so cascade content deletion by hand —
+    # only for this user's own local messages (sender_peer_id IS NULL).
+    await _db.execute(
+        "DELETE FROM message_content WHERE id IN "
+        "(SELECT id FROM message_index WHERE sender_user_id=$1 AND sender_peer_id IS NULL)",
+        uid,
+    )
+    await _db.execute(
+        "DELETE FROM message_index WHERE sender_user_id=$1 AND sender_peer_id IS NULL", uid
+    )
     await _db.execute("DELETE FROM users WHERE id=$1", uid)
 
 
