@@ -207,7 +207,8 @@ async def _handle_read_channels(data: dict, session: dict, ws: web.WebSocketResp
     for peer, chs in zip(peer_list, remote):
         peer["channels"] = chs
 
-    return _ok("read_channels", channels=channels, peers=peer_list)
+    host_address = await db.setting_get("peer_address") or _detect_address()
+    return _ok("read_channels", channels=channels, peers=peer_list, host_address=host_address)
 
 
 async def _handle_read_users(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
@@ -395,19 +396,33 @@ async def _handle_read_channel(data: dict, session: dict, ws: web.WebSocketRespo
         if not peer:
             return _err("read_channel", "Unknown peer")
         channel, messages = await get_remote_messages(peer, cid, session["user_id"])
+        if channel and channel.get("access_denied"):
+            return _err("read_channel", "Not authorised", channel_name=channel.get("name"),
+                        owner=channel.get("owner"), peer_id=peer_id)
+        if not channel:
+            return _err("read_channel", "Could not reach that server, or the chat no longer exists")
         _subscribe_to_channel(cid, ws)   # receive live pushes from the peer
-        return _ok("read_channel", channel=channel, messages=messages, remote=True)
+        return _ok("read_channel", channel=channel, messages=messages, remote=True,
+                   host_address=peer["address"])
 
     if not cid:
         return _err("read_channel", "Missing id")
 
     channel, err = await _check_channel_access(cid, session["user_id"])
     if err:
-        return _err("read_channel", err)
+        ch = await db.channel_by_id(cid)
+        owner = await db.user_by_id(ch["created_by"]) if ch and ch.get("created_by") else None
+        owner_info = {
+            "id":     owner["id"],
+            "name":   owner.get("display_name") or owner["name"],
+            "avatar": owner.get("avatar"),
+        } if owner else None
+        return _err("read_channel", err, channel_name=(ch["name"] if ch else None), owner=owner_info)
 
     _subscribe_to_channel(cid, ws)
     messages = await db.messages_for_channel(cid)
-    return _ok("read_channel", channel=channel, messages=messages)
+    host_address = await db.setting_get("peer_address") or _detect_address()
+    return _ok("read_channel", channel=channel, messages=messages, host_address=host_address)
 
 
 async def _handle_message(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
@@ -1176,6 +1191,51 @@ async def _handle_apply_update(data: dict, session: dict, ws: web.WebSocketRespo
     return _ok("apply_update", message="Update started. The server will restart if a new version is found.")
 
 
+async def _handle_resolve_channel_link(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    """Resolve a pasted 'https://<host>/join/<channel_id>' link to an actionable
+    next step — open locally, open via a known peer, show the owner to ask for
+    access, or (if not yet federated) offer to connect / draft a request."""
+    raw_url = _require_str(data, "url", 512)
+    if not raw_url or "/join/" not in raw_url:
+        return _err("resolve_channel_link", "That doesn't look like a Messages chat link")
+
+    base_part, _, tail = raw_url.partition("/join/")
+    channel_id_part = tail.split("?")[0].split("#")[0].rstrip("/")
+    cid = _str_uuid(channel_id_part)
+    if not cid:
+        return _err("resolve_channel_link", "Invalid channel id in link")
+
+    import urllib.parse as _up
+    parsed = _up.urlparse(base_part)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return _err("resolve_channel_link", "Invalid link")
+
+    host_https = base_part.rstrip("/")
+    host_wss   = host_https.replace("https://", "wss://").replace("http://", "ws://")
+
+    our_address = await db.setting_get("peer_address") or _detect_address()
+    our_https   = our_address.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+
+    if host_https == our_https or host_wss == our_address.rstrip("/"):
+        return _ok("resolve_channel_link", kind="local", channel_id=cid)
+
+    peer = await db.peer_by_address(host_wss)
+
+    if peer and peer.get("status") == "approved":
+        channel, messages = await get_remote_messages(peer, cid, session["user_id"])
+        if channel and channel.get("access_denied"):
+            return _ok("resolve_channel_link", kind="denied", peer_id=peer["id"],
+                       channel_name=channel.get("name"), owner=channel.get("owner"))
+        if channel:
+            return _ok("resolve_channel_link", kind="remote", peer_id=peer["id"], channel_id=cid)
+        return _err("resolve_channel_link", "Could not reach that server, or the chat no longer exists")
+
+    owner_id = await db.setting_get("owner_id")
+    is_owner = str(session["user_id"]) == owner_id
+    return _ok("resolve_channel_link", kind="not_connected", host=host_wss, is_owner=is_owner,
+               owner_id=(None if is_owner else owner_id))
+
+
 async def _handle_read_advanced_config(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
     owner_id = await db.setting_get("owner_id")
     if str(session["user_id"]) != owner_id:
@@ -1326,6 +1386,7 @@ _HANDLERS = {
     "add_peer":         _handle_add_peer,
     "delete_peer":           _handle_delete_peer,
     "fetch_remote_message":  _handle_fetch_remote_message,
+    "resolve_channel_link":  _handle_resolve_channel_link,
 }
 
 

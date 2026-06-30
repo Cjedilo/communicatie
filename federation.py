@@ -506,6 +506,11 @@ async def get_remote_messages(peer: dict, channel_id: uuid.UUID, requesting_user
             resp = json.loads(await asyncio.wait_for(ws.receive_str(), timeout=15))
             if not resp.get("ok"):
                 log.warning("read_channel rejected by %s: %s", peer["address"], resp.get("reason"))
+                if resp.get("channel"):
+                    denied = dict(resp["channel"])
+                    denied["access_denied"] = True
+                    denied["owner"] = resp.get("owner")
+                    return denied, []
                 return None, []
 
             await ws.send_str(_dumps({
@@ -821,7 +826,21 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     elif peer_record:
                         authorised = await db.peer_has_member_in_channel(cid, peer_record["id"])
                     if not authorised:
-                        await ws.send_str(_dumps(_err("read_channel", "Not authorised")))
+                        owner_info = None
+                        if channel.get("created_by"):
+                            owner = await db.user_by_id(channel["created_by"])
+                            if owner:
+                                base_url = (await db.setting_get("peer_address") or _detect_outbound_address()) \
+                                            .replace("wss://", "https://").replace("ws://", "http://")
+                                owner_info = {
+                                    "id":     owner["id"],
+                                    "name":   owner.get("display_name") or owner["name"],
+                                    "avatar": (f"{base_url}/img/{owner['avatar']}" if owner.get("avatar") else None),
+                                }
+                        await ws.send_str(_dumps(_err("read_channel", "Not authorised",
+                            channel={"id": channel["id"], "name": channel["name"],
+                                     "public": bool(channel["public"])},
+                            owner=owner_info)))
                         continue
 
                 before_str = data.get("before")

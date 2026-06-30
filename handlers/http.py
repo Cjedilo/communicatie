@@ -385,6 +385,26 @@ async def proxy_img(request: web.Request) -> web.Response:
         raise web.HTTPBadGateway()
 
 
+async def join_channel(request: web.Request) -> web.Response:
+    """Public landing target for shared chat links: /join/<channel_id>.
+    Always redirects into the app shell with ?join=<id> — the SPA resolves
+    access (open directly, or show the owner to ask) once a session exists."""
+    import uuid as _uuid
+    try:
+        cid = _uuid.UUID(request.match_info.get("channel_id", ""))
+    except ValueError:
+        raise web.HTTPNotFound()
+
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        raise web.HTTPNotFound()
+
+    import urllib.parse as _up
+    qs = _up.urlencode({"join": str(cid), "join_name": channel["name"],
+                        "join_public": "1" if channel["public"] else "0"})
+    raise web.HTTPFound(f"{config.BASE_PATH}/?{qs}")
+
+
 async def succession(request: web.Request) -> web.Response:
     """Public endpoint — no auth. Peers fetch this to resolve cert rotations."""
     return web.json_response({"records": db_config.succession_all()})
@@ -416,6 +436,7 @@ routes = [
     ("GET",  "/users.html",    page("users.html")),
     ("GET",  "/setup/{secret}",              setup_claim),
     ("POST", "/setup/{secret}",              setup_claim),
+    ("GET",  "/join/{channel_id}",           join_channel),
     ("GET",  "/wiki/",                       wiki_page("home")),
     ("GET",  "/wiki/getting-started",        wiki_page("getting-started")),
     ("GET",  "/wiki/router",                 wiki_page("router")),

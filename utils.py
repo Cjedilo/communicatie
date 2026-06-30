@@ -20,8 +20,8 @@ def _ok(type_: str, **data) -> dict:
     return {"type": type_, "ok": True, **data}
 
 
-def _err(type_: str, reason: str) -> dict:
-    return {"type": type_, "ok": False, "reason": reason}
+def _err(type_: str, reason: str, **extra) -> dict:
+    return {"type": type_, "ok": False, "reason": reason, **extra}
 
 
 def _str_uuid(val) -> uuid.UUID | None:

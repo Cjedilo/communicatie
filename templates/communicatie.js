@@ -16,6 +16,8 @@ var communicatie = (function () {
     var pending_parent_id    = null;
     var pending_image        = null;
     var pending_scroll_id    = null;
+    var _pending_message_draft = null;  // pre-fills #message_input after open_channel()
+    var _pending_chat_notice   = null;  // explains why an assisted chat was opened
 
     var known_profiles  = {};
     var needed_profiles = new Set();
@@ -282,6 +284,24 @@ function _channel_icon(ch) {
             });
 
             show_page("/stream.html");
+
+            // Arrived via a shared chat link (/join/<id> → ?join=<id>)
+            var join_id = new URLSearchParams(window.location.search).get("join");
+            if (join_id) {
+                history.replaceState(null, "", _bp + "/");
+                request("read_channel", { id: join_id, peer_id: null }).then(function (d) {
+                    if (d.ok) {
+                        open_channel(join_id, null);
+                    } else if (d.owner) {
+                        start_assisted_chat(d.owner.id, null, d.owner.name,
+                            "Hi! Could I get access to \"" + (d.channel_name || "this chat") + "\"?",
+                            "🔒 You don't have access to \"" + (d.channel_name || "this chat") +
+                            "\" — here's a draft message to ask " + d.owner.name + " for access. Review it and hit send.");
+                    } else {
+                        show_error(d.reason);
+                    }
+                });
+            }
         } else {
             show_page("/login.html");
         }
@@ -297,6 +317,30 @@ function _channel_icon(ch) {
             e.preventDefault();
             do_register();
         });
+
+        // Arrived via a shared chat link while logged out — show context
+        var params    = new URLSearchParams(window.location.search);
+        var join_id   = params.get("join");
+        var join_name = params.get("join_name");
+        var banner    = document.getElementById("join_banner");
+        if (join_id && join_name && banner) {
+            var is_pub = params.get("join_public") === "1";
+            document.getElementById("join_banner_text").textContent =
+                "You're joining " + (is_pub ? "🌐 " : "🔒 ") + join_name + " — log in or register to continue.";
+            banner.classList.remove("hidden");
+
+            document.getElementById("join_elsewhere_btn").addEventListener("click", function () {
+                var url = window.location.origin + _bp + "/join/" + join_id;
+                var msg = "Paste this on your own server, under Channels → 📤 Open link:";
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(url).then(function () {
+                        show_error("Link copied! " + msg);
+                    }).catch(function () { prompt(msg, url); });
+                } else {
+                    prompt(msg, url);
+                }
+            });
+        }
     }
 
     function do_login() {
@@ -600,6 +644,20 @@ function _channel_icon(ch) {
         });
     }
 
+    // Start (or open) a DM with someone and pre-fill a draft message they
+    // must still review and send themselves — used for "ask owner for
+    // access" and "ask my admin to connect" flows.
+    function start_assisted_chat(target_user_id, target_peer_id, target_name, draft_text, notice_text) {
+        request("start_chat", {
+            user_id: target_user_id, peer_id: target_peer_id || null, name: target_name || null,
+        }).then(function (r) {
+            if (!r.ok) { show_error(r.reason); return; }
+            _pending_message_draft = draft_text || null;
+            _pending_chat_notice   = notice_text || null;
+            open_channel(r.channel_id, null);
+        });
+    }
+
     function _upload_image_file(file) {
         if (!file) return;
         var form = new FormData();
@@ -652,7 +710,18 @@ function load_channel() {
             id:      current_channel_id,
             peer_id: current_channel_peer,
         }).then(function (d) {
-            if (!d.ok) { show_error(d.reason); return; }
+            if (!d.ok) {
+                if (d.owner) {
+                    exit_chat();
+                    set_active_nav("stream");
+                    start_assisted_chat(d.owner.id, d.peer_id || null, d.owner.name,
+                        "Hi! Could I get access to \"" + (d.channel_name || "this chat") + "\"?",
+                        "🔒 You don't have access to \"" + (d.channel_name || "this chat") +
+                        "\" — here's a draft message to ask " + d.owner.name + " for access. Review it and hit send.");
+                    return;
+                }
+                show_error(d.reason); return;
+            }
 
             var chan_name = (d.channel && d.channel.name) || "";
             var title = document.getElementById("chat_title");
@@ -660,6 +729,17 @@ function load_channel() {
             if (chan_name) document.title = chan_name;
 
             var ch = d.channel || {};
+
+            var share_btn = document.getElementById("share_btn");
+            if (share_btn) {
+                if (!d.host_address) {
+                    share_btn.classList.add("hidden");
+                } else {
+                    share_btn.classList.remove("hidden");
+                    share_btn.onclick = function () { _copy_share_link(d.host_address, current_channel_id); };
+                }
+            }
+
             var icon_el = document.getElementById("chat_icon");
             if (icon_el) {
                 icon_el.textContent = _channel_icon(ch);
@@ -710,6 +790,10 @@ function load_channel() {
 
             var container = document.getElementById("messages");
             container.replaceChildren();
+            if (_pending_chat_notice) {
+                container.appendChild(make("div", "chat-notice", _pending_chat_notice));
+                _pending_chat_notice = null;
+            }
             d.messages.forEach(function (msg) { append_message(container, msg); });
 
             if (pending_scroll_id) {
@@ -730,6 +814,12 @@ function load_channel() {
 
             if (!d.remote) {
                 setup_chat_buttons(d.channel);
+            }
+
+            if (_pending_message_draft) {
+                var input = document.getElementById("message_input");
+                if (input) input.value = _pending_message_draft;
+                _pending_message_draft = null;
             }
         });
     }
@@ -1799,15 +1889,88 @@ function load_channel() {
         });
     }
 
+    function _copy_share_link(host_address, channel_id) {
+        if (!host_address) return;
+        var https_host = host_address.replace("wss://", "https://").replace("ws://", "http://");
+        var url = https_host.replace(/\/$/, "") + "/join/" + channel_id;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(function () {
+                show_error("Link copied!");
+            }).catch(function () { prompt("Copy this link:", url); });
+        } else {
+            prompt("Copy this link:", url);
+        }
+    }
+
     // ── Channels page ──────────────────────────────────────────────────
+    function resolve_pasted_link(raw_url) {
+        request("resolve_channel_link", { url: raw_url }).then(function (d) {
+            if (!d.ok) { show_error(d.reason); return; }
+            if (d.kind === "local") {
+                open_channel(d.channel_id, null);
+            } else if (d.kind === "remote") {
+                open_channel(d.channel_id, d.peer_id);
+            } else if (d.kind === "denied") {
+                start_assisted_chat(d.owner.id, d.peer_id, d.owner.name,
+                    "Hi! Could I get access to \"" + (d.channel_name || "this chat") + "\"?",
+                    "🔒 You don't have access to \"" + (d.channel_name || "this chat") +
+                    "\" — here's a draft message to ask " + d.owner.name + " for access. Review it and hit send.");
+            } else if (d.kind === "not_connected") {
+                if (d.is_owner) {
+                    if (confirm("Connect to " + d.host + " to view this chat?")) {
+                        request("add_peer", { address: d.host }).then(function (r) {
+                            if (!r.ok) { show_error(r.reason); return; }
+                            resolve_pasted_link(raw_url);
+                        });
+                    }
+                } else {
+                    // Save the link to the user's own Scratchpad rather than putting it in the
+                    // admin DM — the admin only needs to know which host to connect to, not
+                    // which private chat exists on it.
+                    request("start_chat", { user_id: user_id, peer_id: null }).then(function (r) {
+                        if (r.ok) request("message", { channel_id: r.channel_id, text: raw_url });
+                    });
+                    start_assisted_chat(d.owner_id, null, null,
+                        "Could you connect to " + d.host + "? I'd like to access a chat there.",
+                        "🔌 Your server isn't connected to " + d.host + " yet — only the owner can do that. " +
+                        "I saved your chat link to your Scratchpad so you don't lose it — paste it back into " +
+                        "Channels → 📤 Open link once they've connected. Review the draft below and hit send.");
+                }
+            }
+        });
+    }
+
     function setup_channels_page() {
+        var link_btn  = document.getElementById("open_link_btn");
+        var link_form = document.getElementById("open_link_form");
+        var link_input = document.getElementById("open_link_input");
+        if (link_btn) {
+            link_btn.addEventListener("click", function () {
+                link_form.classList.toggle("hidden");
+                if (!link_form.classList.contains("hidden")) link_input.focus();
+            });
+        }
+        if (link_form) {
+            link_form.addEventListener("submit", function (e) {
+                e.preventDefault();
+                var url = link_input.value.trim();
+                if (!url) return;
+                resolve_pasted_link(url);
+                link_input.value = "";
+                link_form.classList.add("hidden");
+            });
+        }
+
+        var _own_host_address = null;
+
         request("read_channels").then(function (d) {
             if (!d.ok) return;
+            _own_host_address = d.host_address;
 
             var list = document.getElementById("channels_list");
             list.replaceChildren();
             d.channels.forEach(function (ch) {
-                list.appendChild(build_channel_item(list, ch));
+                list.appendChild(build_channel_item(list, ch, d.host_address));
             });
 
             document.getElementById("local_filter").addEventListener("input", function () {
@@ -1838,6 +2001,14 @@ function load_channel() {
                         });
                         li.appendChild(icon);
                         li.appendChild(link);
+
+                        var share = make("span", "stream-toggle", "📤");
+                        share.title = "Copy link to this chat";
+                        share.addEventListener("click", function (e) {
+                            e.stopPropagation();
+                            _copy_share_link(peer.address, ch.id);
+                        });
+                        li.appendChild(share);
 
                         var mkey  = (ch.id || "") + "|" + (peer.id || "");
                         // public: opt-in (show if subscribed); private: opt-out (hide if muted)
@@ -1881,12 +2052,12 @@ function load_channel() {
                 document.getElementById("channel_name").value = "";
                 document.getElementById("channel_private").checked = false;
                 var list = document.getElementById("channels_list");
-                list.appendChild(build_channel_item(list, d.channel));
+                list.appendChild(build_channel_item(list, d.channel, _own_host_address));
             });
         });
     }
 
-    function build_channel_item(list, ch) {
+    function build_channel_item(list, ch, host_address) {
         var is_mine = ch.created_by === user_id;
         var li   = make("li", is_mine ? "own-channel" : "");
         var icon = make("span", "icon", _channel_icon(ch));
@@ -1900,6 +2071,11 @@ function load_channel() {
         li.appendChild(link);
         var creator_label = is_mine ? "jij" : (ch.created_by_name || "");
         if (creator_label) li.appendChild(make("span", "channel-creator", creator_label));
+
+        var share = make("span", "stream-toggle", "📤");
+        share.title = "Copy link to this chat";
+        share.addEventListener("click", function () { _copy_share_link(host_address, ch.id); });
+        li.appendChild(share);
 
         var excluded = !!ch.stream_excluded;
         var stream_btn = make("span", "stream-toggle", excluded ? "🔕" : "🔔");
@@ -2054,6 +2230,14 @@ function load_channel() {
                 });
             }
             load_user_messages(target.id, target.peer_id || null);
+
+            var message_section = document.getElementById("message_actions");
+            if (message_section) {
+                message_section.classList.remove("hidden");
+                document.getElementById("profile_message_btn").addEventListener("click", function () {
+                    start_assisted_chat(target.id, target.peer_id || null, target.name, null);
+                });
+            }
 
             if (is_owner && !target.peer_id && admin_actions) {
                 admin_actions.classList.remove("hidden");

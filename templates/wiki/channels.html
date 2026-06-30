@@ -13,6 +13,7 @@
     <a href="#icon">Channel icon</a>
     <a href="#remote">Remote channels</a>
     <a href="#bans">Banning users</a>
+    <a href="#sharing">Sharing a link</a>
 </nav>
 
 <hr>
@@ -47,5 +48,22 @@
 <h2 id="bans">Banning users</h2>
 <p>In public channels, the channel owner can ban users who are disrupting the conversation. Open the channel, click <strong>Ban users</strong> in the header, and drag someone from the active list to the banned list. Banned users can still see the channel but can no longer post.</p>
 <p>To unban, drag them back.</p>
+
+<hr>
+
+<h2 id="sharing">Sharing a link</h2>
+<p>Every channel can be shared as a link — click the 📤 icon in the channel list, or in the chat header once you have it open. The link always points to the server that actually hosts the channel, even if that's a different server than the one you're on.</p>
+
+<p>What happens when someone opens it depends on who they are:</p>
+<ul>
+    <li><strong>No account anywhere on that server</strong> — they land on a page showing the channel name and a register / login form.</li>
+    <li><strong>Account on that server, but not a member of a private channel</strong> — they're dropped into a draft direct message to the channel owner, asking for access. They review it and decide whether to send it.</li>
+    <li><strong>Account, and access</strong> — the chat opens right away.</li>
+</ul>
+
+<h3>Already use Messages on a different server?</h3>
+<p>If the link goes to a server you don't have an account on, you don't need to register there. The landing page has an <strong>"I already have an account elsewhere"</strong> button — it copies the link. Paste it on your own server instead, under <strong>💬 Channels → 📤 Open link</strong>. Your own server figures out the rest.</p>
+
+<p class="wiki-aside">If your server isn't federated with the channel's server yet, connecting is an owner-only decision (it's how your server chooses who to trust). If you're not the owner, a draft request is prepared for them instead — and the link itself is saved to your own Scratchpad rather than sent to the owner, so the chat's existence isn't exposed to a server you're not even connected to yet. Once the owner connects, paste your link again to get in.</p>
 
 {% endblock %}
