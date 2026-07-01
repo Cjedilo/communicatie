@@ -40,6 +40,9 @@
             <input type="checkbox" id="channel_allow_reactions" checked> Allow emoji reactions
         </label>
         <label class="checkbox-label">
+            <input type="checkbox" id="channel_allow_polls" checked> Allow polls
+        </label>
+        <label class="checkbox-label">
             <input type="checkbox" id="channel_allow_markdown" checked> Render markdown
         </label>
         <label class="select-label">
@@ -97,6 +100,7 @@
              ondragover="event.preventDefault(); this.classList.add('active')"
              ondragleave="this.classList.remove('active')"
              ondrop="communicatie.drop_image(event)">+</div>
+        <button id="poll_btn" class="secondary" title="Create poll" style="flex-shrink:0">📊</button>
         <textarea id="message_input" placeholder="Message…" rows="1" maxlength="4096"></textarea>
         <button id="send_btn">Send</button>
     </div>

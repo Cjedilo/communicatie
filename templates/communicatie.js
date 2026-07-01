@@ -18,6 +18,7 @@ var communicatie = (function () {
     var current_channel_restrict_replies = true;
     var current_channel_allow_images     = true;
     var current_channel_allow_reactions  = true;
+    var current_channel_allow_polls      = true;
     var current_channel_allow_markdown   = true;
     var current_channel_can_manage       = false;
     var _chat_origin         = "stream"; // nav page to return to on back
@@ -161,6 +162,7 @@ var communicatie = (function () {
         if (data.type === "message_edited"  && data.ok) on_live_message_edited(data.message);
         if (data.type === "message_deleted" && data.ok) on_live_message_deleted(data.id);
         if (data.type === "reaction_updated" && data.ok) on_live_reaction_updated(data);
+        if (data.type === "poll_updated"    && data.ok) on_live_poll_updated(data);
         if (data.type === "new_message_notification" && data.ok) {
             var nkey = _chan_key(data.channel_id, data.peer_id || null);
             if (!_on_stream_page && nkey !== _chan_key(current_channel_id, current_channel_peer)) {
@@ -260,6 +262,7 @@ function _channel_icon(ch) {
         var restrict_replies_row = document.getElementById("channel_restrict_replies_row");
         var images_cb     = document.getElementById("channel_allow_images");
         var reactions_cb   = document.getElementById("channel_allow_reactions");
+        var polls_cb       = document.getElementById("channel_allow_polls");
         var markdown_cb    = document.getElementById("channel_allow_markdown");
         var edit_mode_sel  = document.getElementById("channel_edit_mode");
         var submit_btn    = document.getElementById("channel_form_submit");
@@ -289,6 +292,7 @@ function _channel_icon(ch) {
         restrict_replies_cb.checked = is_edit ? (existing.restrict_replies !== false && existing.restrict_replies !== 0) : true;
         images_cb.checked     = is_edit ? (existing.allow_images !== false && existing.allow_images !== 0) : true;
         reactions_cb.checked  = is_edit ? (existing.allow_reactions !== false && existing.allow_reactions !== 0) : true;
+        polls_cb.checked      = is_edit ? (existing.allow_polls     !== false && existing.allow_polls     !== 0) : true;
         markdown_cb.checked   = is_edit ? (existing.allow_markdown  !== false && existing.allow_markdown  !== 0) : true;
         edit_mode_sel.value   = is_edit ? (existing.edit_mode || "off") : "off";
         icon_el.textContent = icon_val;
@@ -315,6 +319,7 @@ function _channel_icon(ch) {
             var restrict_replies = restrict_replies_cb.checked;
             var allow_images     = images_cb.checked;
             var allow_reactions  = reactions_cb.checked;
+            var allow_polls      = polls_cb.checked;
             var allow_markdown   = markdown_cb.checked;
             var edit_mode        = edit_mode_sel.value;
             var description      = desc_input.value.trim();
@@ -328,6 +333,7 @@ function _channel_icon(ch) {
                     request("set_channel_restrict_replies", { channel_id: existing.id, peer_id: existing.peer_id || null, restrict_replies: restrict_replies }),
                     request("set_channel_allow_images",    { channel_id: existing.id, peer_id: existing.peer_id || null, allow_images: allow_images }),
                     request("set_channel_allow_reactions", { channel_id: existing.id, peer_id: existing.peer_id || null, allow_reactions: allow_reactions }),
+                    request("set_channel_allow_polls",     { channel_id: existing.id, peer_id: existing.peer_id || null, allow_polls: allow_polls }),
                     request("set_channel_allow_markdown",  { channel_id: existing.id, peer_id: existing.peer_id || null, allow_markdown: allow_markdown }),
                     request("set_channel_edit_mode",       { channel_id: existing.id, peer_id: existing.peer_id || null, edit_mode: edit_mode }),
                     request("set_channel_description",     { channel_id: existing.id, peer_id: existing.peer_id || null, description: description }),
@@ -339,7 +345,8 @@ function _channel_icon(ch) {
                         id: existing.id, icon: icon_val, public: !is_private,
                         allow_replies: allow_replies, post_restricted: post_restricted,
                         restrict_replies: restrict_replies, allow_images: allow_images,
-                        allow_reactions: allow_reactions, allow_markdown: allow_markdown,
+                        allow_reactions: allow_reactions, allow_polls: allow_polls,
+                        allow_markdown: allow_markdown,
                         edit_mode: edit_mode, description: description,
                     });
                 });
@@ -350,7 +357,8 @@ function _channel_icon(ch) {
                     name: name, public: !is_private, icon: icon_val,
                     allow_replies: allow_replies, post_restricted: post_restricted,
                     restrict_replies: restrict_replies, allow_images: allow_images,
-                    allow_reactions: allow_reactions, allow_markdown: allow_markdown,
+                    allow_reactions: allow_reactions, allow_polls: allow_polls,
+                    allow_markdown: allow_markdown,
                     edit_mode: edit_mode, description: description,
                 }).then(function (d) {
                     if (!d.ok) { show_error(d.reason); return; }
@@ -921,6 +929,7 @@ function _channel_icon(ch) {
         current_channel_restrict_replies = true;
         current_channel_allow_images     = true;
         current_channel_allow_reactions  = true;
+        current_channel_allow_polls      = true;
         current_channel_allow_markdown   = true;
         current_channel_can_manage       = false;
         pending_parent_id    = null;
@@ -1114,6 +1123,7 @@ function _channel_icon(ch) {
         });
 
         document.getElementById("send_btn").addEventListener("click", send_message);
+        document.getElementById("poll_btn").addEventListener("click", open_create_poll);
         var inp = document.getElementById("message_input");
         inp.addEventListener("input",   function ()  { _on_mention_input(inp); });
         inp.addEventListener("keydown", function (e) {
@@ -1181,6 +1191,7 @@ function load_channel() {
             current_channel_restrict_replies = ch.restrict_replies !== false && ch.restrict_replies !== 0;
             current_channel_allow_images     = ch.allow_images !== false && ch.allow_images !== 0;
             current_channel_allow_reactions  = ch.allow_reactions !== false && ch.allow_reactions !== 0;
+            current_channel_allow_polls      = ch.allow_polls     !== false && ch.allow_polls     !== 0;
             current_channel_allow_markdown   = ch.allow_markdown  !== false && ch.allow_markdown  !== 0;
             current_channel_can_manage       = !!ch.can_manage;
             _update_compose_visibility();
@@ -1262,6 +1273,8 @@ function load_channel() {
     function _apply_image_restriction() {
         var dz = document.getElementById("drop_zone");
         if (dz) dz.classList.toggle("hidden", !current_channel_allow_images);
+        var pb = document.getElementById("poll_btn");
+        if (pb) pb.classList.toggle("hidden", !current_channel_allow_polls);
     }
 
     function setup_chat_buttons(channel) {
@@ -1299,8 +1312,10 @@ function load_channel() {
                     current_channel_restrict_replies = updated.restrict_replies;
                     current_channel_allow_images     = updated.allow_images;
                     channel.allow_reactions  = updated.allow_reactions;
+                    channel.allow_polls      = updated.allow_polls;
                     channel.allow_markdown   = updated.allow_markdown;
                     current_channel_allow_reactions  = updated.allow_reactions;
+                    current_channel_allow_polls      = updated.allow_polls;
                     current_channel_allow_markdown   = updated.allow_markdown;
                     _update_compose_visibility();
                     _apply_image_restriction();
@@ -1530,6 +1545,130 @@ function load_channel() {
         if (rel) render_reactions(el._msg, rel);
     }
 
+    function render_poll(msg, body) {
+        var data;
+        try { data = JSON.parse(msg.text); } catch (e) { body.textContent = msg.text; return; }
+        var question = data.question || "";
+        var options  = Array.isArray(data.options) ? data.options : [];
+        var pv       = msg.poll_votes || {};
+        var counts   = pv.counts || {};
+        var my_vote  = (pv.my_vote !== undefined && pv.my_vote !== null) ? pv.my_vote : -1;
+        var total    = Object.values(counts).reduce(function (a, b) { return a + b; }, 0);
+
+        var card = make("div", "poll-card");
+        card.appendChild(make("div", "poll-question", question));
+        var opts_el = make("div", "poll-options");
+        options.forEach(function (opt, i) {
+            var cnt = counts[i] || 0;
+            var pct = total > 0 ? Math.round(cnt / total * 100) : 0;
+            var btn = make("button", "poll-option" + (i === my_vote ? " voted" : ""));
+            var bar = make("div", "poll-bar");
+            bar.style.width = pct + "%";
+            btn.appendChild(bar);
+            btn.appendChild(make("span", "poll-option-label", opt));
+            btn.appendChild(make("span", "poll-option-count", cnt + " (" + pct + "%)"));
+            btn.addEventListener("click", function () { poll_vote_click(msg, i); });
+            opts_el.appendChild(btn);
+        });
+        card.appendChild(opts_el);
+        card.appendChild(make("div", "poll-total", total + " vote" + (total !== 1 ? "s" : "")));
+        body.appendChild(card);
+    }
+
+    function poll_vote_click(msg, option_index) {
+        request("poll_vote", {
+            id:           msg.id,
+            channel_id:   current_channel_id,
+            peer_id:      current_channel_peer || null,
+            option_index: option_index,
+        }).then(function (d) {
+            if (!d.ok) { show_error(d.reason || "Could not vote"); return; }
+            msg.poll_votes = { counts: d.counts || {}, my_vote: option_index };
+            var el = document.querySelector("[data-id='" + msg.id + "'] .content");
+            if (el) { el.replaceChildren(); render_poll(msg, el); }
+        });
+    }
+
+    function on_live_poll_updated(data) {
+        var el = document.querySelector("[data-id='" + data.id + "']");
+        if (!el || !el._msg) return;
+        var my_vote = el._msg.poll_votes ? el._msg.poll_votes.my_vote : -1;
+        el._msg.poll_votes = { counts: data.counts || {}, my_vote: (my_vote !== undefined ? my_vote : -1) };
+        var cel = el.querySelector(".content");
+        if (cel) { cel.replaceChildren(); render_poll(el._msg, cel); }
+    }
+
+    function open_create_poll() {
+        if (document.getElementById("poll_modal")) return;
+
+        var modal = make("div", "poll-modal");
+        modal.id = "poll_modal";
+        var box = make("div", "poll-modal-box");
+        box.appendChild(make("h3", null, "Create a poll"));
+
+        var q_input = document.createElement("input");
+        q_input.type = "text";
+        q_input.placeholder = "Question…";
+        q_input.maxLength = 256;
+        box.appendChild(q_input);
+
+        var opts_list = make("div", "poll-opts-list");
+        function add_opt_row(val) {
+            var row = make("div", "poll-opt-row");
+            var inp = document.createElement("input");
+            inp.type = "text";
+            inp.placeholder = "Option…";
+            inp.maxLength = 128;
+            if (val) inp.value = val;
+            var rm = make("button", "secondary", "✕");
+            rm.title = "Remove";
+            rm.addEventListener("click", function () {
+                if (opts_list.children.length > 2) row.remove();
+            });
+            row.appendChild(inp);
+            row.appendChild(rm);
+            opts_list.appendChild(row);
+        }
+        add_opt_row(""); add_opt_row("");
+        box.appendChild(opts_list);
+
+        var add_btn = make("button", "secondary", "+ Add option");
+        add_btn.addEventListener("click", function () {
+            if (opts_list.children.length < 10) add_opt_row("");
+        });
+        box.appendChild(add_btn);
+
+        var actions = make("div", "poll-modal-actions");
+        var cancel = make("button", "secondary", "Cancel");
+        cancel.addEventListener("click", function () { modal.remove(); });
+        var submit = make("button", null, "Create poll");
+        submit.addEventListener("click", function () {
+            var question = q_input.value.trim();
+            var options = Array.from(opts_list.querySelectorAll("input"))
+                .map(function (i) { return i.value.trim(); })
+                .filter(Boolean);
+            if (!question) { show_error("Question is required"); return; }
+            if (options.length < 2) { show_error("At least 2 options required"); return; }
+            request("create_poll", {
+                channel_id: current_channel_id,
+                peer_id:    current_channel_peer || null,
+                question:   question,
+                options:    options,
+            }).then(function (d) {
+                if (!d.ok) { show_error(d.reason || "Could not create poll"); return; }
+                modal.remove();
+            });
+        });
+        actions.appendChild(cancel);
+        actions.appendChild(submit);
+        box.appendChild(actions);
+
+        modal.appendChild(box);
+        modal.addEventListener("click", function (e) { if (e.target === modal) modal.remove(); });
+        document.body.appendChild(modal);
+        q_input.focus();
+    }
+
     function _esc(s) {
         return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
@@ -1615,6 +1754,10 @@ function load_channel() {
     }
 
     function render_content(body, msg) {
+        if ((msg.msg_type || "text") === "poll") {
+            render_poll(msg, body);
+            return;
+        }
         if (msg.text) {
             body.appendChild(current_channel_allow_markdown
                 ? render_markdown(msg.text)
@@ -2861,6 +3004,20 @@ function load_channel() {
         });
     }
 
+    function _fmt_search_date(iso) {
+        var d = new Date(iso);
+        var now = new Date();
+        if (d.toDateString() === now.toDateString())
+            return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        return d.toLocaleDateString([], { month: "short", day: "numeric" });
+    }
+
+    function _highlight_query(text, query) {
+        var esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        var re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+        return esc.replace(re, function (m) { return "<mark>" + m + "</mark>"; });
+    }
+
     function setup_channels_page() {
         var link_btn  = document.getElementById("open_link_btn");
         var link_form = document.getElementById("open_link_form");
@@ -2879,6 +3036,61 @@ function load_channel() {
                 resolve_pasted_link(url);
                 link_input.value = "";
                 link_form.classList.add("hidden");
+            });
+        }
+
+        var search_btn     = document.getElementById("search_btn");
+        var search_overlay = document.getElementById("search_overlay");
+        var close_search   = document.getElementById("close_search");
+        var search_input   = document.getElementById("search_input");
+        var search_results = document.getElementById("search_results");
+        if (search_btn && search_overlay) {
+            search_btn.addEventListener("click", function () {
+                search_overlay.classList.remove("hidden");
+                search_input.focus();
+            });
+        }
+        if (close_search && search_overlay) {
+            close_search.addEventListener("click", function () {
+                search_overlay.classList.add("hidden");
+            });
+        }
+        var _search_timer = null;
+        if (search_input) {
+            search_input.addEventListener("input", function () {
+                clearTimeout(_search_timer);
+                var q = search_input.value.trim();
+                if (q.length < 2) { search_results.replaceChildren(); return; }
+                _search_timer = setTimeout(function () {
+                    request("search_messages", { query: q }).then(function (r) {
+                        if (!r.ok) return;
+                        var q2 = search_input.value.trim();
+                        search_results.replaceChildren();
+                        if (!r.results.length) {
+                            search_results.appendChild(make("div", "search-empty", "No results found."));
+                            return;
+                        }
+                        r.results.forEach(function (msg) {
+                            var item = make("div", "search-result-item");
+                            var meta = make("div", "search-result-meta");
+                            meta.appendChild(make("span", "chat-icon", msg.channel_icon || "🗨️"));
+                            meta.appendChild(make("span", "search-result-channel", msg.channel_name || "Channel"));
+                            if (msg.peer_address) meta.appendChild(make("span", "search-result-peer", "@" + (msg.peer_address.replace(/wss?:\/\//, ""))));
+                            meta.appendChild(make("span", "search-result-sep", "·"));
+                            meta.appendChild(make("span", "", msg.sender_name || ""));
+                            meta.appendChild(make("span", "search-result-time", _fmt_search_date(msg.created)));
+                            var snippet = make("div", "search-result-snippet");
+                            snippet.innerHTML = _highlight_query(msg.text || "", q2);
+                            item.appendChild(meta);
+                            item.appendChild(snippet);
+                            item.addEventListener("click", function () {
+                                search_overlay.classList.add("hidden");
+                                open_channel(msg.channel_id, msg.peer_id || null);
+                            });
+                            search_results.appendChild(item);
+                        });
+                    });
+                }, 300);
             });
         }
 

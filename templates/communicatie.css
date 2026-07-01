@@ -572,6 +572,96 @@ body {
 .history-entry .time { display: block; font-size: .7rem; color: var(--text-dim); }
 .history-entry .text { font-size: .85rem; color: var(--text-dim); }
 
+/* ── Poll card ───────────────────────────────────────────────── */
+.poll-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: .6rem .8rem;
+    margin-top: .15rem;
+    max-width: 360px;
+}
+.poll-question {
+    font-weight: 600;
+    margin-bottom: .55rem;
+    font-size: .95rem;
+}
+.poll-options { display: flex; flex-direction: column; gap: .4rem; }
+.poll-option {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: .35rem .65rem;
+    cursor: pointer;
+    font-size: .88rem;
+    text-align: left;
+    overflow: hidden;
+    transition: border-color .15s;
+}
+.poll-option:hover  { border-color: var(--accent); }
+.poll-option.voted  { border-color: var(--accent); font-weight: 600; }
+.poll-bar {
+    position: absolute;
+    inset: 0;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    transform-origin: left;
+    pointer-events: none;
+    transition: width .35s ease;
+}
+.poll-option-label { position: relative; flex: 1; }
+.poll-option-count {
+    position: relative;
+    font-size: .78rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+.poll-total {
+    margin-top: .4rem;
+    font-size: .75rem;
+    color: var(--text-dim);
+}
+
+/* ── Create poll modal ───────────────────────────────────────── */
+.poll-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0,0,0,.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.poll-modal-box {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.2rem 1.4rem;
+    width: min(420px, 95vw);
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+}
+.poll-modal-box h3 { margin: 0 0 .2rem; font-size: 1rem; }
+.poll-modal-box input[type=text] {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: .4rem .65rem;
+    font-size: .9rem;
+}
+.poll-opts-list { display: flex; flex-direction: column; gap: .35rem; }
+.poll-opt-row   { display: flex; gap: .4rem; align-items: center; }
+.poll-opt-row input { flex: 1; }
+.poll-opt-row button { flex-shrink: 0; font-size: .85rem; padding: .3rem .6rem; }
+.poll-modal-actions { display: flex; gap: .5rem; justify-content: flex-end; }
+
 /* ── Input area ──────────────────────────────────────────────── */
 .input-area {
     border-top: 1px solid var(--border);
@@ -1293,6 +1383,70 @@ button.secondary { background: var(--bg3); }
     z-index: 99;
     max-width: 90vw;
     text-align: center;
+}
+
+/* ── Search ──────────────────────────────────────────────────── */
+.search-panel {
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+    padding: 1rem;
+    flex: 1;
+    overflow: hidden;
+}
+.search-panel input[type="search"] {
+    width: 100%;
+}
+.search-results {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+}
+.search-result-item {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: .5rem .75rem;
+    cursor: pointer;
+    transition: background .12s;
+}
+.search-result-item:hover { background: var(--bg3); }
+.search-result-meta {
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    font-size: .78rem;
+    color: var(--text-dim);
+    margin-bottom: .25rem;
+    flex-wrap: wrap;
+}
+.search-result-channel { font-weight: 600; color: var(--text); }
+.search-result-peer { color: var(--text-dim); font-size: .75rem; }
+.search-result-sep { opacity: .4; }
+.search-result-time { margin-left: auto; }
+.search-result-snippet {
+    font-size: .88rem;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.search-result-snippet mark {
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
+    color: var(--accent);
+    border-radius: 2px;
+    padding: 0 1px;
+}
+.search-empty {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 2rem;
+    font-size: .9rem;
 }
 
 /* ── Scrollbar ───────────────────────────────────────────────── */

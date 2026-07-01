@@ -1,5 +1,6 @@
 <div class="page-header">
     <h2>Channels</h2>
+    <button type="button" id="search_btn" class="secondary">🔍 Search</button>
     <button type="button" id="open_link_btn" class="secondary">📤 Open link</button>
 </div>
 
@@ -19,6 +20,17 @@
     <ul id="channels_list" class="item-list"></ul>
     <button type="button" id="new_channel_btn" class="secondary">+ New channel</button>
 </section>
+
+<div id="search_overlay" class="hidden overlay">
+    <div class="overlay-header">
+        <span>Search messages</span>
+        <button type="button" id="close_search" class="secondary">Close</button>
+    </div>
+    <div class="search-panel">
+        <input type="search" id="search_input" placeholder="Search messages…" autocomplete="off">
+        <div id="search_results" class="search-results"></div>
+    </div>
+</div>
 
 <div id="new_channel_overlay" class="hidden overlay">
     <div class="overlay-header">
@@ -48,6 +60,9 @@
         </label>
         <label class="checkbox-label">
             <input type="checkbox" id="channel_allow_reactions" checked> Allow emoji reactions
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="channel_allow_polls" checked> Allow polls
         </label>
         <label class="checkbox-label">
             <input type="checkbox" id="channel_allow_markdown" checked> Render markdown

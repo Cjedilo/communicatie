@@ -508,6 +508,26 @@ async def get_peer_stream_messages(peer: dict, max_channels: int = 5, limit_per_
         return []
 
 
+async def search_on_peer(peer: dict, query: str) -> list[dict]:
+    """Search public messages on a peer server. Returns [] on any failure."""
+    our_address = await db.setting_get("peer_address") or _detect_outbound_address()
+    try:
+        resp = await _session(peer).request(
+            {"type": "search_messages", "query": query, "from": our_address},
+            timeout=5,
+        )
+        if not resp.get("ok"):
+            return []
+        results = resp.get("results", [])
+        for r in results:
+            r["peer_id"]      = str(peer["id"])
+            r["peer_address"] = peer["address"]
+        return results
+    except Exception as e:
+        log.debug("Search on peer %s failed: %s", peer["address"], e)
+        return []
+
+
 async def get_remote_messages(peer: dict, channel_id: uuid.UUID, requesting_user_id: uuid.UUID) -> tuple[dict | None, list[dict]]:
     """Ask a peer for the message index of a channel, then subscribe for live updates."""
     our_address = await db.setting_get("peer_address") or _detect_outbound_address()
@@ -601,6 +621,7 @@ async def notify_peers_of_message(
     sender_name: str = "",
     sender_avatar: str | None = None,
     parent_id: uuid.UUID | None = None,
+    msg_type: str = "text",
 ):
     """
     Notify all peers subscribed to a channel that a new message exists.
@@ -627,6 +648,7 @@ async def notify_peers_of_message(
         "has_image":      has_image,
         "created":        created,
         "parent_id":      parent_id,
+        "msg_type":       msg_type,
     })
 
     peers      = {p["address"]: p for p in await db.peers_all()}
@@ -675,6 +697,7 @@ async def send_message_to_peer(
     parent_id: uuid.UUID | None = None,
     text: str | None = None,
     has_image: bool = False,
+    msg_type: str = "text",
 ) -> tuple[bool, dict]:
     """Send a new message notification to the channel's server.
     Returns (ok, info) — on rejection info carries the server's reason and,
@@ -692,6 +715,7 @@ async def send_message_to_peer(
             "created":        created,
             "text":           text,
             "has_image":      has_image,
+            "msg_type":       msg_type,
         }, timeout=10)
         if resp.get("ok"):
             return True, {}
@@ -823,6 +847,45 @@ async def toggle_reaction_on_peer(peer: dict, channel_id: uuid.UUID, msg_id: uui
     except Exception as e:
         log.warning("Failed to toggle reaction on peer %s: %s %r", peer["address"], type(e).__name__, e)
         return False, {"reason": "Could not reach that server"}
+
+
+async def poll_vote_on_peer(peer: dict, channel_id: uuid.UUID, msg_id: uuid.UUID,
+                            sender_user_id: uuid.UUID, option_index: int) -> tuple[bool, dict]:
+    """Ask the channel-hosting peer to record a poll vote."""
+    our_address = await db.setting_get("peer_address") or _detect_outbound_address()
+    try:
+        resp = await _session(peer).request({
+            "type":           "poll_vote",
+            "channel_id":     channel_id,
+            "message_id":     msg_id,
+            "sender_user_id": sender_user_id,
+            "option_index":   option_index,
+            "from":           our_address,
+        }, timeout=10)
+        if resp.get("ok"):
+            return True, {"counts": resp.get("counts", {}), "total": resp.get("total", 0),
+                          "my_vote": option_index}
+        return False, {"reason": resp.get("reason")}
+    except Exception as e:
+        log.warning("Failed to poll vote on peer %s: %s %r", peer["address"], type(e).__name__, e)
+        return False, {"reason": "Could not reach that server"}
+
+
+async def notify_peers_of_poll_updated(channel_id: uuid.UUID, msg_id: uuid.UUID,
+                                       vote_data: dict, exclude_peer: str | None = None):
+    """Push updated poll vote counts to all subscribers."""
+    channel = await db.channel_by_id(channel_id)
+    payload = _dumps({
+        "type":       "poll_updated",
+        "channel_id": channel_id,
+        "message_id": msg_id,
+        "counts":     vote_data.get("counts", {}),
+        "total":      vote_data.get("total", 0),
+    })
+    peers      = {p["address"]: p for p in await db.peers_all()}
+    recipients = await _subscriber_recipients(channel_id, channel, peers)
+    recipients.discard(exclude_peer)
+    await _fanout_to_peers(payload, recipients, peers)
 
 
 async def edit_message_on_peer(peer: dict, msg_id: uuid.UUID, sender_user_id: uuid.UUID,
@@ -1135,7 +1198,8 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
             elif msg_type in ("set_channel_icon", "set_channel_public",
                                "set_channel_allow_replies", "set_channel_post_restricted",
                                "set_channel_restrict_replies", "set_channel_allow_images",
-                               "set_channel_allow_reactions", "set_channel_allow_markdown",
+                               "set_channel_allow_reactions", "set_channel_allow_polls",
+                               "set_channel_allow_markdown",
                                "set_channel_edit_mode", "set_channel_description"):
                 peer_record = await _authed_peer(data)
                 if not peer_record:
@@ -1216,6 +1280,7 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 parent_id     = _str_uuid(data.get("parent_id"))
                 msg_text      = data.get("text")
                 has_image     = bool(data.get("has_image"))
+                fed_msg_type  = data.get("msg_type") or "text"
 
                 channel = await db.channel_by_id(cid)
 
@@ -1255,7 +1320,8 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                         await db.user_cache_upsert(sender_user_id, peer_id_val, sender_name, sender_avatar)
 
                     await db.message_index_add(
-                        mid, cid, sender_user_id, peer_id_val, parent_id, created
+                        mid, cid, sender_user_id, peer_id_val, parent_id, created,
+                        msg_type=fed_msg_type,
                     )
                     # DESIGN: content is NEVER cached for received messages.
                     # The originating server is the sole source of truth.
@@ -1280,10 +1346,12 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                     "peer_address":    sender_address,
                     "peer_name":       peer_name_val,
                     "parent_id":       str(parent_id) if parent_id else None,
+                    "msg_type":        fed_msg_type,
                     "text":            msg_text,
                     "image":           "📷" if has_image and not msg_text else None,
                     "created":         created.isoformat(),
                     "remote":          True,
+                    "poll_votes":      {"counts": {}, "my_vote": None} if fed_msg_type == "poll" else None,
                 }
                 await broadcast_to_channel(cid, {"type": "message", "ok": True, "message": bcast_msg})
                 proxy_av = (f"{config.BASE_PATH}/proxy_img?url={sender_avatar}"
@@ -1476,6 +1544,77 @@ async def peer_ws_handler(request: web.Request) -> web.WebSocketResponse:
                 if channel:
                     asyncio.create_task(notify_peers_of_reaction(
                         cid, mid, reactions, exclude_peer=peer_record["address"]))
+
+            elif msg_type == "poll_vote":
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("poll_vote", "Peer authentication failed")))
+                    continue
+
+                mid            = _str_uuid(data.get("message_id"))
+                cid            = _str_uuid(data.get("channel_id"))
+                sender_user_id = _str_uuid(data.get("sender_user_id"))
+                try:
+                    option_index = int(data.get("option_index", -1))
+                except (ValueError, TypeError):
+                    option_index = -1
+
+                if not mid or not cid or option_index < 0:
+                    await ws.send_str(_dumps(_err("poll_vote", "Missing required fields")))
+                    continue
+
+                channel = await db.channel_by_id(cid)
+
+                if channel:
+                    # We host this channel.
+                    if not sender_user_id:
+                        await ws.send_str(_dumps(_err("poll_vote", "Missing sender_user_id")))
+                        continue
+                    if not channel["public"]:
+                        if not await db.is_remote_member(cid, sender_user_id, peer_record["id"]):
+                            await ws.send_str(_dumps(_err("poll_vote", "Not a member of this channel")))
+                            continue
+                    else:
+                        if await db.is_banned(cid, sender_user_id, peer_record["id"]):
+                            await ws.send_str(_dumps(_err("poll_vote", "You are banned from this channel")))
+                            continue
+                    vote_data = await db.poll_vote(mid, sender_user_id, option_index)
+                    await ws.send_str(_dumps(_ok("poll_vote", **vote_data)))
+                else:
+                    # Relay: not the host.
+                    vote_data = {"counts": data.get("counts", {}), "total": data.get("total", 0)}
+                    await ws.send_str(_dumps(_ok("poll_vote")))
+
+                from handlers.ws import broadcast_to_channel
+                await broadcast_to_channel(cid, {"type": "poll_updated", "ok": True,
+                    "id": str(mid), "channel_id": str(cid), **vote_data})
+                if channel:
+                    asyncio.create_task(notify_peers_of_poll_updated(
+                        cid, mid, vote_data, exclude_peer=peer_record["address"]))
+
+            elif msg_type == "poll_updated":
+                # Push from host: relay to our local clients.
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    continue
+                mid  = _str_uuid(data.get("message_id"))
+                cid  = _str_uuid(data.get("channel_id"))
+                from handlers.ws import broadcast_to_channel
+                await broadcast_to_channel(cid, {"type": "poll_updated", "ok": True,
+                    "id": str(mid), "channel_id": str(cid),
+                    "counts": data.get("counts", {}), "total": data.get("total", 0)})
+
+            elif msg_type == "search_messages":
+                peer_record = await _authed_peer(data)
+                if not peer_record:
+                    await ws.send_str(_dumps(_err("search_messages", "Peer authentication failed")))
+                    continue
+                query = (data.get("query") or "").strip()
+                if len(query) < 2:
+                    await ws.send_str(_dumps(_err("search_messages", "Query too short")))
+                    continue
+                results = await db.messages_search_public(query)
+                await ws.send_str(_dumps(_ok("search_messages", results=[dict(r) for r in results])))
 
             else:
                 await ws.send_str(_dumps(_err(msg_type, f"Unknown type: {msg_type}")))

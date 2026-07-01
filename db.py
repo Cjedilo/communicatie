@@ -164,6 +164,21 @@ class _PGBackend:
             await c.execute(
                 "CREATE INDEX IF NOT EXISTS msg_mentions_user ON message_mentions(mentioned_user_id)"
             )
+            await c.execute(
+                "ALTER TABLE message_index ADD COLUMN IF NOT EXISTS msg_type TEXT NOT NULL DEFAULT 'text'"
+            )
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS poll_votes (
+                    message_id   UUID        NOT NULL,
+                    user_id      UUID        NOT NULL,
+                    option_index INTEGER     NOT NULL,
+                    voted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (message_id, user_id)
+                )
+            """)
+            await c.execute(
+                "CREATE INDEX IF NOT EXISTS poll_votes_msg ON poll_votes(message_id)"
+            )
 
     async def close(self):
         if self._pool:
@@ -219,6 +234,7 @@ class _SQLiteBackend:
             "ALTER TABLE channel_members ADD COLUMN is_moderator INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE channels ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'",
             "ALTER TABLE message_index ADD COLUMN edited_at TEXT",
+            "ALTER TABLE message_index ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'text'",
         ]:
             try:
                 await self._conn.execute(col_sql)
@@ -268,6 +284,18 @@ class _SQLiteBackend:
         """)
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS msg_mentions_user ON message_mentions(mentioned_user_id)"
+        )
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS poll_votes (
+                message_id   TEXT    NOT NULL,
+                user_id      TEXT    NOT NULL,
+                option_index INTEGER NOT NULL,
+                voted_at     TEXT    NOT NULL,
+                PRIMARY KEY (message_id, user_id)
+            )
+        """)
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS poll_votes_msg ON poll_votes(message_id)"
         )
         await self._conn.commit()
 
@@ -563,7 +591,8 @@ async def channel_create(name: str, public: bool, created_by: uuid.UUID, icon: s
                           allow_replies: bool = True, post_restricted: bool = False,
                           edit_mode: str = "off", description: str = "",
                           allow_images: bool = True, restrict_replies: bool = True,
-                          allow_reactions: bool = True, allow_markdown: bool = True) -> dict:
+                          allow_reactions: bool = True, allow_markdown: bool = True,
+                          allow_polls: bool = True) -> dict:
     cid      = _new_id()
     pub      = 1 if (_is_sqlite and public) else public
     excl     = 1 if (_is_sqlite and public) else public  # public → excluded from stream by default
@@ -571,6 +600,7 @@ async def channel_create(name: str, public: bool, created_by: uuid.UUID, icon: s
         "allow_replies": allow_replies, "post_restricted": post_restricted, "edit_mode": edit_mode,
         "description": description, "allow_images": allow_images, "restrict_replies": restrict_replies,
         "allow_reactions": allow_reactions, "allow_markdown": allow_markdown,
+        "allow_polls": allow_polls,
     })
     if _is_sqlite:
         await _db.execute(
@@ -970,12 +1000,13 @@ async def message_index_add(
     sender_peer_id: uuid.UUID | None,
     parent_id: uuid.UUID | None,
     created: datetime,
+    msg_type: str = "text",
 ):
     await _db.execute(
         "INSERT INTO message_index"
-        "(id,channel_id,sender_user_id,sender_peer_id,parent_id,created) "
-        "VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
-        msg_id, channel_id, sender_user_id, sender_peer_id, parent_id, created,
+        "(id,channel_id,sender_user_id,sender_peer_id,parent_id,created,msg_type) "
+        "VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
+        msg_id, channel_id, sender_user_id, sender_peer_id, parent_id, created, msg_type,
     )
 
 
@@ -1034,7 +1065,8 @@ async def messages_by_user(
     )
 
 
-async def messages_for_channel(channel_id: uuid.UUID, limit: int = 100, before=None) -> list[dict]:
+async def messages_for_channel(channel_id: uuid.UUID, limit: int = 100, before=None,
+                               viewer_user_id: uuid.UUID | None = None) -> list[dict]:
     before_clause = "AND mi.created < $3" if before is not None else ""
     extra_args    = (before,) if before is not None else ()
     # With `before`: DESC so we get the *newest* messages before the cursor (stream pagination).
@@ -1062,8 +1094,12 @@ async def messages_for_channel(channel_id: uuid.UUID, limit: int = 100, before=N
         channel_id, limit, *extra_args,
     )
     reactions = await reactions_for_messages([m["id"] for m in messages])
+    poll_ids  = [m["id"] for m in messages if (m.get("msg_type") or "text") == "poll"]
+    poll_data = await poll_votes_for_messages(poll_ids, viewer_user_id) if poll_ids else {}
     for m in messages:
         m["reactions"] = reactions.get(str(m["id"]), [])
+        if (m.get("msg_type") or "text") == "poll":
+            m["poll_votes"] = poll_data.get(str(m["id"]), {"counts": {}, "my_vote": None})
     return messages
 
 
@@ -1078,6 +1114,65 @@ async def message_by_id(msg_id: uuid.UUID) -> dict | None:
         WHERE mi.id = $1
         """,
         msg_id,
+    )
+
+
+async def messages_search_public(query: str, limit: int = 20) -> list[dict]:
+    """Search public channels only — used by federation (no per-user auth)."""
+    op  = "LIKE" if _is_sqlite else "ILIKE"
+    pub = 1 if _is_sqlite else True
+    return await _db.fetch(
+        f"""
+        SELECT mi.id, mi.channel_id, mi.created,
+               mc.text,
+               COALESCE(COALESCE(u.display_name, u.name), uc.name) AS sender_name,
+               COALESCE(c.icon, '') AS channel_icon,
+               COALESCE(c.name, '') AS channel_name
+        FROM message_index mi
+        JOIN message_content mc ON mc.id = mi.id
+        JOIN channels c ON c.id = mi.channel_id
+        LEFT JOIN users u ON u.id = mi.sender_user_id AND mi.sender_peer_id IS NULL
+        LEFT JOIN user_cache uc ON uc.user_id = mi.sender_user_id
+            AND uc.peer_id = mi.sender_peer_id
+        WHERE mc.text {op} $1
+          AND (mi.msg_type IS NULL OR mi.msg_type = 'text')
+          AND mc.image IS NULL
+          AND c.public = $2
+        ORDER BY mi.created DESC
+        LIMIT $3
+        """,
+        f"%{query}%", pub, limit,
+    )
+
+
+async def messages_search(query: str, user_id: uuid.UUID, limit: int = 30) -> list[dict]:
+    op  = "LIKE" if _is_sqlite else "ILIKE"
+    pub = 1 if _is_sqlite else True
+    return await _db.fetch(
+        f"""
+        SELECT mi.id, mi.channel_id, mi.created,
+               mc.text,
+               COALESCE(COALESCE(u.display_name, u.name), uc.name,
+                   (SELECT name FROM user_cache WHERE user_id = mi.sender_user_id LIMIT 1)
+               ) AS sender_name,
+               COALESCE(c.icon, '') AS channel_icon,
+               COALESCE(c.name, '') AS channel_name
+        FROM message_index mi
+        JOIN message_content mc ON mc.id = mi.id
+        JOIN channels c ON c.id = mi.channel_id
+        LEFT JOIN channel_members cm ON cm.channel_id = mi.channel_id
+            AND cm.user_id = $1 AND cm.peer_id IS NULL
+        LEFT JOIN users u ON u.id = mi.sender_user_id AND mi.sender_peer_id IS NULL
+        LEFT JOIN user_cache uc ON uc.user_id = mi.sender_user_id
+            AND uc.peer_id = mi.sender_peer_id
+        WHERE mc.text {op} $2
+          AND (mi.msg_type IS NULL OR mi.msg_type = 'text')
+          AND mc.image IS NULL
+          AND (c.public = $4 OR cm.user_id IS NOT NULL OR c.created_by = $1)
+        ORDER BY mi.created DESC
+        LIMIT $3
+        """,
+        user_id, f"%{query}%", limit, pub,
     )
 
 
@@ -1205,6 +1300,64 @@ async def reactions_for_messages(message_ids: list[uuid.UUID]) -> dict[str, list
         mid: [{"emoji": e, "users": u} for e, u in emojis.items()]
         for mid, emojis in grouped.items()
     }
+
+
+async def poll_vote(message_id: uuid.UUID, user_id: uuid.UUID, option_index: int) -> dict:
+    """Record or update a user's vote. Returns updated {"counts": {opt: n}, "total": n}."""
+    if _is_sqlite:
+        await _db.execute(
+            "INSERT INTO poll_votes(message_id,user_id,option_index,voted_at) VALUES($1,$2,$3,$4) "
+            "ON CONFLICT(message_id,user_id) DO UPDATE SET option_index=$3, voted_at=$4",
+            message_id, user_id, option_index, _now(),
+        )
+    else:
+        await _db.execute(
+            "INSERT INTO poll_votes(message_id,user_id,option_index,voted_at) VALUES($1,$2,$3,NOW()) "
+            "ON CONFLICT(message_id,user_id) DO UPDATE SET option_index=$3, voted_at=NOW()",
+            message_id, user_id, option_index,
+        )
+    return await poll_vote_counts(message_id)
+
+
+async def poll_vote_counts(message_id: uuid.UUID) -> dict:
+    """Returns {"counts": {option_index: count}, "total": n}."""
+    rows = await _db.fetch(
+        "SELECT option_index, COUNT(*) AS cnt FROM poll_votes WHERE message_id=$1 GROUP BY option_index",
+        message_id,
+    )
+    counts = {int(r["option_index"]): int(r["cnt"]) for r in rows}
+    return {"counts": counts, "total": sum(counts.values())}
+
+
+async def poll_votes_for_messages(message_ids: list[uuid.UUID],
+                                  viewer_user_id: uuid.UUID | None = None) -> dict:
+    """Batch poll vote data. Returns {msg_id_str: {"counts": {...}, "my_vote": int|None}}."""
+    if not message_ids:
+        return {}
+    if _is_sqlite:
+        placeholders = ",".join(f"${i+1}" for i in range(len(message_ids)))
+        rows = await _db.fetch(
+            f"SELECT message_id, user_id, option_index FROM poll_votes "
+            f"WHERE message_id IN ({placeholders})",
+            *message_ids,
+        )
+    else:
+        rows = await _db.fetch(
+            "SELECT message_id, user_id, option_index FROM poll_votes "
+            "WHERE message_id = ANY($1::uuid[])",
+            message_ids,
+        )
+    result: dict = {}
+    viewer_str = str(viewer_user_id) if viewer_user_id else None
+    for r in rows:
+        mid = str(r["message_id"])
+        if mid not in result:
+            result[mid] = {"counts": {}, "my_vote": None}
+        opt = int(r["option_index"])
+        result[mid]["counts"][opt] = result[mid]["counts"].get(opt, 0) + 1
+        if viewer_str and str(r["user_id"]) == viewer_str:
+            result[mid]["my_vote"] = opt
+    return result
 
 
 async def message_mentions_store(message_id: uuid.UUID, user_ids: list[uuid.UUID]):

@@ -356,6 +356,22 @@ async def _handle_set_channel_allow_reactions(data: dict, session: dict, ws: web
     return _ok("set_channel_allow_reactions", channel_id=cid, allow_reactions=allow_reactions)
 
 
+async def _handle_set_channel_allow_polls(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    fwd = await _forward_channel_setting(data, session, "set_channel_allow_polls")
+    if fwd is not None: return fwd
+    cid = _str_uuid(data.get("channel_id"))
+    if not cid:
+        return _err("set_channel_allow_polls", "Missing channel_id")
+    channel = await db.channel_by_id(cid)
+    if not channel:
+        return _err("set_channel_allow_polls", "Channel not found")
+    if not await _can_manage_channel(channel, session["user_id"]):
+        return _err("set_channel_allow_polls", "Not authorised")
+    allow_polls = bool(data.get("allow_polls", True))
+    await db.channel_update_settings(cid, {"allow_polls": allow_polls})
+    return _ok("set_channel_allow_polls", channel_id=cid, allow_polls=allow_polls)
+
+
 async def _handle_set_channel_edit_mode(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
     fwd = await _forward_channel_setting(data, session, "set_channel_edit_mode")
     if fwd is not None: return fwd
@@ -574,12 +590,14 @@ async def _handle_create_channel(data: dict, session: dict, ws: web.WebSocketRes
     restrict_replies = bool(data.get("restrict_replies", True))
     allow_reactions  = bool(data.get("allow_reactions", True))
     allow_markdown   = bool(data.get("allow_markdown", True))
+    allow_polls      = bool(data.get("allow_polls", True))
     if not name:
         return _err("create_channel", "Channel name required")
 
     channel = await db.channel_create(name, public, session["user_id"], icon,
                                        allow_replies, post_restricted, edit_mode, description,
-                                       allow_images, restrict_replies, allow_reactions, allow_markdown)
+                                       allow_images, restrict_replies, allow_reactions, allow_markdown,
+                                       allow_polls)
     if not public:
         # Creator is automatically a member of private channels
         await db.member_add(channel["id"], session["user_id"])
@@ -646,7 +664,7 @@ async def _handle_read_channel(data: dict, session: dict, ws: web.WebSocketRespo
     channel["poster_count"]  = await db.channel_poster_count(cid)
 
     _subscribe_to_channel(cid, ws)
-    messages = await db.messages_for_channel(cid)
+    messages = await db.messages_for_channel(cid, viewer_user_id=session["user_id"])
     host_address = await db.setting_get("peer_address") or _detect_address()
     return _ok("read_channel", channel=channel, messages=messages, host_address=host_address)
 
@@ -935,6 +953,141 @@ async def _handle_toggle_reaction(data: dict, session: dict, ws: web.WebSocketRe
     from federation import notify_peers_of_reaction
     asyncio.create_task(notify_peers_of_reaction(channel["id"], mid, reactions))
     return _ok("toggle_reaction", id=mid, reactions=reactions)
+
+
+async def _handle_create_poll(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    if not _rate_ok(session["user_id"], config.RATE_LIMIT_MESSAGES):
+        return _err("create_poll", "Rate limit exceeded")
+
+    cid      = _str_uuid(data.get("channel_id"))
+    peer_id  = _str_uuid(data.get("peer_id"))
+    question = (data.get("question") or "").strip()
+    options  = [str(o).strip() for o in (data.get("options") or []) if str(o).strip()]
+
+    if not cid:
+        return _err("create_poll", "Missing channel_id")
+    if not question:
+        return _err("create_poll", "Poll needs a question")
+    if len(options) < 2:
+        return _err("create_poll", "At least 2 options required")
+    if len(options) > 10:
+        return _err("create_poll", "Maximum 10 options")
+
+    import json as _json
+    poll_text = _json.dumps({"question": question, "options": options})
+
+    msg_id  = uuid.uuid4()
+    created = datetime.now(timezone.utc)
+    user    = await db.user_by_id(session["user_id"])
+
+    if peer_id:
+        peer = await db.peer_by_id(peer_id)
+        if not peer:
+            return _err("create_poll", "Unknown peer")
+        our_address = await db.setting_get("peer_address") or _detect_address()
+        await db.message_content_add(msg_id, poll_text, None)
+        from federation import send_message_to_peer
+        ok, info = await send_message_to_peer(
+            peer, cid, msg_id, session["user_id"], our_address, created,
+            sender_name=user["name"] or "",
+            sender_avatar=None,
+            parent_id=None,
+            text=poll_text,
+            has_image=False,
+            msg_type="poll",
+        )
+        if not ok:
+            return _err("create_poll", info.get("reason") or "Could not deliver poll to remote server")
+        return _ok("create_poll", id=msg_id)
+
+    channel, err = await _check_channel_access(cid, session["user_id"])
+    if err:
+        return _err("create_poll", err)
+
+    if channel["public"] and await db.is_banned(cid, session["user_id"]):
+        return _err("create_poll", "You are banned from this channel")
+
+    if not channel.get("allow_polls", True):
+        return _err("create_poll", "Polls are turned off in this channel")
+
+    restricted = channel.get("post_restricted") and not channel.get("restrict_replies", True)
+    if restricted and not await _can_manage_channel(channel, session["user_id"]):
+        return _err("create_poll", "Only moderators can post in this channel")
+
+    await db.message_index_add(msg_id, cid, session["user_id"], None, None, created, msg_type="poll")
+    await db.message_content_add(msg_id, poll_text, None)
+
+    poll_msg = {
+        "id":             msg_id,
+        "channel_id":     cid,
+        "sender_user_id": session["user_id"],
+        "sender_peer_id": None,
+        "sender_name":    user.get("display_name") or user["name"],
+        "sender_avatar":  user.get("avatar"),
+        "parent_id":      None,
+        "msg_type":       "poll",
+        "text":           poll_text,
+        "image":          None,
+        "created":        created,
+        "poll_votes":     {"counts": {}, "my_vote": None},
+    }
+    await broadcast_to_channel(cid, _ok("message", message=poll_msg))
+    asyncio.create_task(notify_peers_of_message(
+        cid, msg_id, session["user_id"], created,
+        sender_name=user.get("display_name") or user["name"] or "",
+        sender_avatar=user.get("avatar"),
+        parent_id=None,
+        msg_type="poll",
+    ))
+    return _ok("create_poll", id=msg_id)
+
+
+async def _handle_poll_vote(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    mid     = _str_uuid(data.get("id"))
+    cid     = _str_uuid(data.get("channel_id"))
+    peer_id = _str_uuid(data.get("peer_id"))
+    try:
+        option_index = int(data.get("option_index", -1))
+    except (ValueError, TypeError):
+        option_index = -1
+
+    if not mid:
+        return _err("poll_vote", "Missing id")
+    if option_index < 0:
+        return _err("poll_vote", "Invalid option_index")
+
+    if peer_id:
+        peer = await db.peer_by_id(peer_id)
+        if not peer:
+            return _err("poll_vote", "Unknown peer")
+        from federation import poll_vote_on_peer
+        ok, info = await poll_vote_on_peer(peer, cid, mid, session["user_id"], option_index)
+        if not ok:
+            return _err("poll_vote", info.get("reason") or "Could not record vote on remote server")
+        return _ok("poll_vote", id=mid, **info)
+
+    msg = await db.message_by_id(mid)
+    if not msg:
+        return _err("poll_vote", "Message not found")
+    if (msg.get("msg_type") or "text") != "poll":
+        return _err("poll_vote", "Not a poll")
+
+    channel, err = await _check_channel_access(msg["channel_id"], session["user_id"])
+    if err:
+        return _err("poll_vote", err)
+    if channel["public"] and await db.is_banned(channel["id"], session["user_id"]):
+        return _err("poll_vote", "You are banned from this channel")
+
+    vote_data = await db.poll_vote(mid, session["user_id"], option_index)
+    vote_data["my_vote"] = option_index
+
+    payload = {"type": "poll_updated", "ok": True, "id": str(mid),
+               "channel_id": str(channel["id"]), **vote_data}
+    await broadcast_to_channel(channel["id"], payload)
+
+    from federation import notify_peers_of_poll_updated
+    asyncio.create_task(notify_peers_of_poll_updated(channel["id"], mid, vote_data))
+    return _ok("poll_vote", id=mid, **vote_data)
 
 
 async def _handle_read_message_history(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
@@ -1828,6 +1981,31 @@ async def _handle_set_advanced_config(data: dict, session: dict, ws: web.WebSock
     return _ok("set_advanced_config", needs_restart=needs_restart)
 
 
+async def _handle_search_messages(data: dict, session: dict, ws: web.WebSocketResponse) -> dict:
+    import asyncio as _asyncio
+    from datetime import datetime as _dt
+    from federation import search_on_peer
+
+    query = (data.get("query") or "").strip()
+    if len(query) < 2:
+        return _err("search_messages", "Query must be at least 2 characters")
+
+    local = [dict(r) for r in await db.messages_search(query, session["user_id"])]
+    for r in local:
+        if isinstance(r.get("created"), _dt):
+            r["created"] = r["created"].isoformat()
+
+    peers = [p for p in await db.peers_all() if (p.get("status") or "approved") == "approved"]
+    peer_results = await _asyncio.gather(*[search_on_peer(p, query) for p in peers], return_exceptions=True)
+    combined = local[:]
+    for pr in peer_results:
+        if isinstance(pr, list):
+            combined.extend(pr)
+
+    combined.sort(key=lambda r: str(r.get("created") or ""), reverse=True)
+    return _ok("search_messages", results=combined[:50])
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -1844,6 +2022,7 @@ _HANDLERS = {
     "set_channel_restrict_replies": _handle_set_channel_restrict_replies,
     "set_channel_allow_images":    _handle_set_channel_allow_images,
     "set_channel_allow_reactions": _handle_set_channel_allow_reactions,
+    "set_channel_allow_polls":     _handle_set_channel_allow_polls,
     "set_channel_allow_markdown":  _handle_set_channel_allow_markdown,
     "set_channel_edit_mode":       _handle_set_channel_edit_mode,
     "set_channel_description":     _handle_set_channel_description,
@@ -1894,10 +2073,13 @@ _HANDLERS = {
     "edit_message":              _handle_edit_message,
     "delete_message":            _handle_delete_message,
     "toggle_reaction":           _handle_toggle_reaction,
+    "create_poll":               _handle_create_poll,
+    "poll_vote":                 _handle_poll_vote,
     "mark_channel_read":         _handle_mark_channel_read,
     "read_message_history":      _handle_read_message_history,
     "fetch_remote_message_history": _handle_fetch_remote_message_history,
     "resolve_channel_link":  _handle_resolve_channel_link,
+    "search_messages":       _handle_search_messages,
 }
 
 
