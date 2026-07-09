@@ -860,7 +860,9 @@ function _channel_icon(ch) {
         body.appendChild(top);
 
         var preview = make("div", "stream-preview");
-        if (msg.text || msg.image) {
+        if ((msg.msg_type || "text") === "poll") {
+            preview.appendChild(render_poll_preview(msg));
+        } else if (msg.text || msg.image) {
             if (msg.image && !msg.text) { preview.appendChild(document.createTextNode("📷 Image")); }
             else { preview.appendChild(render_markdown(msg.text)); }
         } else if (msg.id) {
@@ -1543,6 +1545,37 @@ function load_channel() {
         el._msg.reactions = data.reactions;
         var rel = el.querySelector(".reactions");
         if (rel) render_reactions(el._msg, rel);
+    }
+
+    function render_poll_preview(msg) {
+        var el = make("div", "poll-preview");
+        var data;
+        try { data = JSON.parse(msg.text); } catch (e) { el.textContent = msg.text; return el; }
+        var question = data.question || "";
+        var options  = Array.isArray(data.options) ? data.options : [];
+        var pv       = msg.poll_votes || {};
+        var counts   = pv.counts || {};
+        var total    = Object.values(counts).reduce(function (a, b) { return a + b; }, 0);
+        el.appendChild(make("span", "poll-preview-icon", "📊"));
+        el.appendChild(make("span", "poll-preview-question", question));
+        if (options.length) {
+            var scores = make("div", "poll-preview-scores");
+            options.forEach(function (opt, i) {
+                var cnt = counts[i] || 0;
+                var pct = total > 0 ? Math.round(cnt / total * 100) : 0;
+                var bar = make("div", "poll-preview-bar-row");
+                var label = make("span", "poll-preview-label", opt);
+                var fill  = make("div", "poll-preview-fill");
+                fill.style.width = pct + "%";
+                var stat  = make("span", "poll-preview-stat", cnt + " (" + pct + "%)");
+                bar.appendChild(label);
+                bar.appendChild(fill);
+                bar.appendChild(stat);
+                scores.appendChild(bar);
+            });
+            el.appendChild(scores);
+        }
+        return el;
     }
 
     function render_poll(msg, body) {

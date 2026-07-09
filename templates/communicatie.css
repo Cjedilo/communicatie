@@ -300,6 +300,11 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+.stream-preview:has(.poll-preview) {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
+}
 
 .stream-preview .preview-sender { color: var(--text); }
 
@@ -623,6 +628,45 @@ body {
     margin-top: .4rem;
     font-size: .75rem;
     color: var(--text-dim);
+}
+
+/* ── Poll stream preview ─────────────────────────────────────── */
+.poll-preview {
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+    white-space: normal;
+}
+.poll-preview-icon { margin-right: .3rem; }
+.poll-preview-question { font-weight: 500; color: var(--text); }
+.poll-preview-scores { display: flex; flex-direction: column; gap: .15rem; margin-top: .2rem; }
+.poll-preview-bar-row {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    font-size: .78rem;
+    position: relative;
+}
+.poll-preview-label {
+    min-width: 4rem;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.poll-preview-fill {
+    height: .45rem;
+    border-radius: 99px;
+    background: color-mix(in srgb, var(--accent) 55%, transparent);
+    flex-shrink: 0;
+    min-width: 2px;
+    transition: width .35s ease;
+    max-width: 80px;
+}
+.poll-preview-stat {
+    color: var(--text-dim);
+    white-space: nowrap;
 }
 
 /* ── Create poll modal ───────────────────────────────────────── */

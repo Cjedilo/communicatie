@@ -78,6 +78,22 @@
     max-width: 780px;
 }
 
+.wiki-ai-banner {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    font-size: .78rem;
+    font-weight: 500;
+    color: color-mix(in srgb, var(--accent) 80%, var(--text));
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-radius: 99px;
+    padding: .28rem .75rem;
+    margin-bottom: 1.5rem;
+    letter-spacing: .01em;
+}
+.wiki-ai-icon { font-size: .85rem; }
+
 .wiki-article h1 {
     font-size: 1.8rem;
     font-weight: 700;

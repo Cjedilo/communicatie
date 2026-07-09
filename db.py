@@ -628,7 +628,7 @@ async def stream_messages(user_id: uuid.UUID, limit: int = 60, before=None) -> l
     """Recent messages across all visible, non-excluded local channels."""
     before_clause = "AND mi.created < $5" if before is not None else ""
     extra_args    = (before,) if before is not None else ()
-    return await _db.fetch(
+    messages = await _db.fetch(
         f"""
         SELECT mi.*, mc.text, mc.image,
                COALESCE(COALESCE(u.display_name, u.name), uc.name,
@@ -665,6 +665,13 @@ async def stream_messages(user_id: uuid.UUID, limit: int = 60, before=None) -> l
         limit,
         *extra_args,
     )
+    poll_ids  = [m["id"] for m in messages if (m.get("msg_type") or "text") == "poll"]
+    poll_data = await poll_votes_for_messages(poll_ids, user_id) if poll_ids else {}
+    messages  = [dict(m) for m in messages]
+    for m in messages:
+        if (m.get("msg_type") or "text") == "poll":
+            m["poll_votes"] = poll_data.get(str(m["id"]), {"counts": {}, "my_vote": None})
+    return messages
 
 
 async def channel_last_message_summary(channel_id: uuid.UUID) -> dict | None:
