@@ -12,7 +12,6 @@
     <a href="#database">Database</a>
     <a href="#ssl">SSL certificate</a>
     <a href="#peers">Peer policy</a>
-    <a href="#peers">Peer policy</a>
     <a href="#connecting">Connecting to a peer</a>
     <a href="#advanced">Advanced settings</a>
 </nav>
@@ -53,10 +52,10 @@
 <h2 id="ssl">SSL certificate</h2>
 <p>All connections to your server are encrypted. By default, Messages generates a <strong>self-signed certificate</strong> — this works immediately but causes a browser warning on first visit. See <a href="{{ base_path }}/wiki/getting-started#as-an-admin">Getting started</a> for why that warning isn't as scary as it looks.</p>
 
-<p>There are three options:</p>
+<p>There are two options:</p>
 <ul>
-    <li><strong>Self-signed, auto-generated</strong> — the default. Use <em>Renew</em> to generate a fresh certificate. Existing peers are notified automatically and stay connected.</li>
-    <li><strong>Your own certificate</strong> — enter paths to your <code>.pem</code> files (e.g. from Let's Encrypt). Use <em>Reload</em> after certbot or another tool has renewed the files on disk — no restart needed.</li>
+    <li><strong>Self-signed, auto-generated</strong> — the default. Use <em>Renew</em> to generate a fresh certificate. Existing peers are notified automatically and stay connected via the succession mechanism.</li>
+    <li><strong>Your own certificate</strong> — enter paths to your <code>.pem</code> files (e.g. from Let's Encrypt or certbot). Use <em>Reload</em> after the tool has renewed the files on disk — no restart needed.</li>
 </ul>
 <p>The expiry date is shown next to the certificate info. A warning badge (!) appears on the Server icon when renewal is overdue.</p>
 

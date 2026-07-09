@@ -42,6 +42,8 @@
 <hr>
 
 <h2 id="admin">Admin actions</h2>
-<p>If you're the server owner, you'll also see a ✕ button next to local users. This permanently deletes their account and all their messages.</p>
+<p>If you're the server owner, you'll see a ✕ button next to local users. Clicking it permanently deletes their account, all their messages, and all their uploaded images — this cannot be undone.</p>
+<p>Before deleting an account, consider whether you simply want to revoke access without erasing history. There is currently no suspend or deactivate option — deletion is the only removal tool. If you want to prevent someone from logging in while keeping their messages intact, changing their password via the database is the workaround.</p>
+<p class="wiki-aside">Remote users (on peer servers) cannot be deleted from here — they're managed on their home server. You can block them individually, or block their entire home server under <strong>🔗 Peers</strong>.</p>
 
 {% endblock %}
